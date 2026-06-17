@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #0f2d1a;
+  overscroll-behavior: none;
+}
+
+#root {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  background-color: #0f2d1a;
+  position: relative;
+}
+
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+input, button {
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.scrollable {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.form-bar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  z-index: 50;
+  background: #071a0e;
+  border-top: 1px solid #1a472a;
+  padding-bottom: env(safe-area-inset-bottom, 8px);
+}
+
+.rep-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #1a472a;
+  overflow: hidden;
+}
+
+.rep-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #f0b429, #fcd34d);
+  transition: width 0.5s ease;
+}
+
+.card-glow {
+  box-shadow: 0 0 0 1px rgba(240, 180, 41, 0.15);
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.slide-up {
+  animation: slideUp 0.3s ease forwards;
+}
+
+@keyframes pulse-gold {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.pulse-gold {
+  animation: pulse-gold 1.5s ease infinite;
+}
