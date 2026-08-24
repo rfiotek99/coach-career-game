@@ -6,10 +6,14 @@
 // de eventos automáticos propio; el motor genérico (la cola, el modal, y
 // resolveLifeEventEffects) no cambia.
 
+import { canApplyToClub } from './gameData.js'
+
 export const EVENT_CATEGORIES = {
   vestuario: { label: 'Vestuario', icon: '🧤' },
   mercado: { label: 'Mercado', icon: '💰' },
-  // futuro: vidaPersonal, prensa, hinchada — se agregan acá sin tocar el resto
+  carrera: { label: 'Tu carrera', icon: '🧭' },
+  'prensa-personal': { label: 'La prensa', icon: '🎙️' },
+  legado: { label: 'Legado', icon: '🎖️' },
 }
 
 const LEADER_COUNT = 3
@@ -145,6 +149,131 @@ export const LIFE_EVENT_TYPES = {
       { text: 'Negarme — se queda, le guste o no', hint: '-16 Ánimo · riesgo de contagio', effects: { playerMorale: -16 } },
     ],
   },
+
+  // ── Decisiones de carrera — sobre el propio camino del DT, no del plantel ──
+  carrera_tentacion_secreta: {
+    category: 'carrera',
+    buildText: ({ club, suitor }) =>
+      `${suitor} te tentó por lo bajo: te quieren como técnico, aunque tu contrato con ${club} sigue vigente. Todavía nadie lo sabe.`,
+    buildOptions: ({ suitorClubId, suitorPrestige }) => [
+      { text: 'Ser leal — cortarla de raíz y avisarle a la dirigencia', hint: '+8 Confianza dirigencia · +1 Reputación', effects: { boardConfidence: 8, reputation: 1 } },
+      { text: 'Escuchar la propuesta, sin comprometerte a nada', hint: '-3 Confianza dirigencia · abre diálogo', effects: { boardConfidence: -3, startCoachInterest: { clubId: suitorClubId, prestige: suitorPrestige } } },
+    ],
+  },
+
+  carrera_contrato_presion: {
+    category: 'carrera',
+    buildText: ({ club }) =>
+      `La dirigencia de ${club} quiere atarte a un contrato más largo — pero con exigencias bastante más altas.`,
+    options: [
+      { text: 'Firmar — más años, más presión', hint: '+2 años de contrato · -5 Confianza dirigencia · +2 Reputación', effects: { contractYears: 2, boardConfidence: -5, reputation: 2 } },
+      { text: 'Rechazar — preferís ir temporada a temporada', hint: '+2 Confianza dirigencia', effects: { boardConfidence: 2 } },
+    ],
+  },
+
+  carrera_club_historico_crisis: {
+    category: 'carrera',
+    buildText: ({ suitor }) =>
+      `${suitor}, un histórico en crisis, te sondea para hacerte cargo — necesitan un salvador y pensaron en vos.`,
+    buildOptions: ({ suitorClubId, suitorPrestige }) => [
+      { text: 'Escuchar — un desafío así no aparece siempre', hint: '+1 Reputación · abre diálogo', effects: { reputation: 1, startCoachInterest: { clubId: suitorClubId, prestige: suitorPrestige } } },
+      { text: 'Declinar — no es el momento', hint: '+2 Confianza dirigencia', effects: { boardConfidence: 2 } },
+    ],
+  },
+
+  carrera_prioridad_copa: {
+    category: 'carrera',
+    buildText: ({ club }) =>
+      `La dirigencia de ${club} te pide que priorices la copa por encima de la liga esta temporada — quieren un título internacional.`,
+    options: [
+      { text: 'Aceptar — la copa es la prioridad', hint: '+6 Confianza dirigencia', effects: { boardConfidence: 6 } },
+      { text: 'Negarte — la liga es la base del proyecto', hint: '-3 Confianza dirigencia · +2 Reputación', effects: { boardConfidence: -3, reputation: 2 } },
+    ],
+  },
+
+  // ── Prensa en persona — más allá de las ruedas de prensa post-partido ─────
+  prensa_provocacion: {
+    category: 'prensa-personal',
+    buildText: () =>
+      'Un periodista te busca la respuesta filosa en plena conferencia: "¿No cree que el equipo juega mejor sin usted en el banco?"',
+    options: [
+      { text: 'Responder con calma, sin caer en la trampa', hint: '+2 Reputación', effects: { reputation: 2 } },
+      { text: 'Contraatacar con dureza — que se haga cargo de lo que dice', hint: '+4 Moral plantel · -3 Reputación', effects: { clubMorale: 4, reputation: -3 } },
+    ],
+  },
+
+  prensa_critica_publica: {
+    category: 'prensa-personal',
+    buildText: () =>
+      'Un colega del ambiente te cuestionó públicamente por tu manejo del plantel. Los micrófonos esperan tu respuesta.',
+    options: [
+      { text: 'Ignorar el comentario — no le das entidad', hint: '+3 Reputación', effects: { reputation: 3 } },
+      { text: 'Responder con contundencia, defendiendo tu trabajo', hint: '+5 Confianza dirigencia · -2 Reputación', effects: { boardConfidence: 5, reputation: -2 } },
+    ],
+  },
+
+  prensa_defender_jugador: {
+    category: 'prensa-personal',
+    buildText: ({ player }) =>
+      `La prensa castiga a ${player} por su bajo nivel reciente. Te preguntan si todavía confiás en él.`,
+    options: [
+      { text: 'Defenderlo públicamente — tiene todo mi respaldo', hint: '+8 Ánimo · +2 Moral plantel', effects: { playerMorale: 8, clubMorale: 2 } },
+      { text: 'Dejarlo solo — que responda con juego', hint: '-6 Ánimo · +2 Reputación', effects: { playerMorale: -6, reputation: 2 } },
+    ],
+  },
+
+  prensa_criticar_arbitro: {
+    category: 'prensa-personal',
+    buildText: () =>
+      'Te preguntan por el arbitraje después de la derrota. Todo el mundo espera que digas lo que piensa la hinchada.',
+    options: [
+      { text: 'Cuestionar el arbitraje sin filtro', hint: '+5 Moral plantel · -2 Reputación (riesgo de sanción)', effects: { clubMorale: 5, reputation: -2 } },
+      { text: 'No victimizarse — el resultado fue nuestro', hint: '+3 Reputación', effects: { reputation: 3 } },
+    ],
+  },
+
+  // ── Legado y presión — hitos de carrera y momentos de estrés en rachas
+  // negativas. Narrativos, impacto acotado a propósito (dan color, no giran
+  // la partida).
+  legado_aniversario: {
+    category: 'legado',
+    buildText: ({ years }) =>
+      `Se cumplen ${years} años desde que arrancaste como técnico. Mirás para atrás y pensás en todo lo que cambió.`,
+    options: [
+      { text: 'Celebrarlo con el plantel', hint: '+3 Moral plantel', effects: { clubMorale: 3 } },
+      { text: 'Seguir de largo — hay trabajo que hacer', hint: '+1 Reputación', effects: { reputation: 1 } },
+    ],
+  },
+
+  legado_hito_titulos: {
+    category: 'legado',
+    buildText: ({ n }) =>
+      `Con ${n} título${n > 1 ? 's' : ''} en tu carrera, la gente empieza a hablar de vos como un ganador. ¿Cómo lo llevás?`,
+    options: [
+      { text: 'Con humildad — esto recién empieza', hint: '+2 Confianza dirigencia', effects: { boardConfidence: 2 } },
+      { text: 'Con orgullo — te lo ganaste', hint: '+2 Reputación', effects: { reputation: 2 } },
+    ],
+  },
+
+  legado_reflexion: {
+    category: 'legado',
+    buildText: ({ club }) =>
+      `Una noche tranquila te agarra pensando en el legado que querés dejar en ${club}.`,
+    options: [
+      { text: 'Pensar en los títulos que todavía faltan', hint: '+1 Reputación', effects: { reputation: 1 } },
+      { text: 'Pensar en la gente que formaste en el camino', hint: '+2 Moral plantel', effects: { clubMorale: 2 } },
+    ],
+  },
+
+  legado_presion_racha: {
+    category: 'legado',
+    buildText: () =>
+      'Las noches sin dormir se acumulan. La racha te pesa más de lo que admitís en público.',
+    options: [
+      { text: 'Tomarte un respiro y confiar en el proceso', hint: '+3 Moral plantel', effects: { clubMorale: 3 } },
+      { text: 'Redoblar la exigencia con vos mismo', hint: '+2 Reputación · -2 Moral plantel', effects: { reputation: 2, clubMorale: -2 } },
+    ],
+  },
 }
 
 export const CHARLA_TYPES = {
@@ -269,6 +398,126 @@ export function generateMarketExitEvent(club) {
   if (ambitious.length && Math.random() < 0.05) {
     const pick = ambitious[Math.floor(Math.random() * ambitious.length)]
     return buildEvent('pedido_salida_ambicion', { player: pick.name }, pick)
+  }
+
+  return null
+}
+
+// ── Automatic "carrera" events — sobre el propio camino del DT ─────────────
+// Mismo estilo/prioridad que generateVestuarioEvent/generateMarketExitEvent:
+// evalúa condiciones en orden y devuelve a lo sumo un evento. `ctx`:
+// { allClubs, repNow, boardConfidence, contractEndSeason, season, hasActiveInterest }
+export function generateCareerEvent(myClub, ctx) {
+  if (!myClub || !ctx) return null
+  const { allClubs = [], repNow = 0, boardConfidence = 0, contractEndSeason, season, hasActiveInterest = false } = ctx
+
+  // 1. Tentación secreta de un club más grande — no dispara si ya hay un
+  // rumor de interés activo (evita pisar al sistema pasivo de coachInterest).
+  if (!hasActiveInterest) {
+    const biggerSuitors = allClubs.filter(c =>
+      c.id !== myClub.id && c.managerId !== 'player' &&
+      c.prestige > myClub.prestige + 10 && canApplyToClub(repNow, c.prestige)
+    )
+    if (biggerSuitors.length && Math.random() < 0.10) {
+      const suitor = biggerSuitors[Math.floor(Math.random() * biggerSuitors.length)]
+      return buildEvent(
+        'carrera_tentacion_secreta', { club: myClub.name, suitor: suitor.name }, null,
+        { suitorClubId: suitor.id, suitorPrestige: suitor.prestige }
+      )
+    }
+  }
+
+  // 2. Contrato más largo, con más presión — solo si el contrato actual está
+  // por vencer pronto y la dirigencia confía lo suficiente para ofrecerlo.
+  if (contractEndSeason != null && season != null && (contractEndSeason - season) <= 2 && boardConfidence >= 55) {
+    if (Math.random() < 0.10) {
+      return buildEvent('carrera_contrato_presion', { club: myClub.name }, null)
+    }
+  }
+
+  // 3. Un histórico en crisis (prestigio alto, moral de club baja) te sondea.
+  if (!hasActiveInterest) {
+    const historicInCrisis = allClubs.filter(c =>
+      c.id !== myClub.id && c.managerId !== 'player' &&
+      c.prestige >= 80 && c.morale < 45 && canApplyToClub(repNow, c.prestige)
+    )
+    if (historicInCrisis.length && Math.random() < 0.12) {
+      const suitor = historicInCrisis[Math.floor(Math.random() * historicInCrisis.length)]
+      return buildEvent(
+        'carrera_club_historico_crisis', { suitor: suitor.name }, null,
+        { suitorClubId: suitor.id, suitorPrestige: suitor.prestige }
+      )
+    }
+  }
+
+  // 4. La dirigencia pide priorizar la copa — solo clubes de primera.
+  if (myClub.leagueId === 'liga-premier' && Math.random() < 0.08) {
+    return buildEvent('carrera_prioridad_copa', { club: myClub.name }, null)
+  }
+
+  return null
+}
+
+// ── Automatic "prensa-personal" events — declaraciones/polémicas fuera de las
+// ruedas de prensa post-partido (esas viven en pressData.js/triggerPressConference,
+// no se tocan). Mismo estilo/prioridad que los demás generadores automáticos.
+// `ctx`: { repNow, boardConfidence, playerGoalDiff }
+export function generatePrensaEvent(myClub, ctx) {
+  if (!myClub || !ctx) return null
+  const { repNow = 0, boardConfidence = 100, playerGoalDiff = null } = ctx
+  const squad = myClub.squad || []
+
+  // 1. Provocación de un periodista — cualquier DT con algo de prensa encima.
+  if (repNow >= 20 && Math.random() < 0.10) {
+    return buildEvent('prensa_provocacion', {}, null)
+  }
+
+  // 2. Crítica pública de un colega — más probable bajo presión de la dirigencia.
+  if (boardConfidence < 60 && Math.random() < 0.09) {
+    return buildEvent('prensa_critica_publica', {}, null)
+  }
+
+  // 3. La prensa castiga a un jugador de bajo ánimo — necesita un candidato.
+  const criticized = squad.find(p =>
+    (p.morale ?? 70) < 40 && (p.injuredFor || 0) === 0 && (p.suspendedFor || 0) === 0
+  )
+  if (criticized && Math.random() < 0.10) {
+    return buildEvent('prensa_defender_jugador', { player: criticized.name }, criticized)
+  }
+
+  // 4. Arbitraje cuestionado — solo tras una derrota dura reciente.
+  if (playerGoalDiff !== null && playerGoalDiff < 0 && Math.random() < 0.10) {
+    return buildEvent('prensa_criticar_arbitro', {}, null)
+  }
+
+  return null
+}
+
+// ── Automatic "legado" events — hitos de carrera y presión en rachas negativas.
+// `ctx`: { seasonsManaged, trophiesCount, streak }
+export function generateLegacyEvent(myClub, ctx) {
+  if (!myClub || !ctx) return null
+  const { seasonsManaged = 0, trophiesCount = 0, streak = { type: 'none', count: 0 } } = ctx
+
+  // 1. Aniversario — cada 5 temporadas dirigiendo.
+  if (seasonsManaged > 0 && seasonsManaged % 5 === 0 && Math.random() < 0.08) {
+    return buildEvent('legado_aniversario', { years: seasonsManaged }, null)
+  }
+
+  // 2. Hito de títulos — 1, 3, 5 o 10 en la carrera.
+  if ([1, 3, 5, 10].includes(trophiesCount) && Math.random() < 0.08) {
+    return buildEvent('legado_hito_titulos', { n: trophiesCount }, null)
+  }
+
+  // 3. Presión en racha negativa — mismo umbral que la rueda de prensa
+  // "racha_negativa" (pressData.js), pero es un momento aparte, más íntimo.
+  if (streak.type === 'loss' && streak.count >= 3 && Math.random() < 0.10) {
+    return buildEvent('legado_presion_racha', {}, null)
+  }
+
+  // 4. Reflexión ambiental — solo con algo de trayectoria en el cargo.
+  if (seasonsManaged >= 2 && Math.random() < 0.07) {
+    return buildEvent('legado_reflexion', { club: myClub.name }, null)
   }
 
   return null

@@ -35,6 +35,7 @@ import {
 import {
   generateVestuarioEvent, getCharlaEvent, resolveLifeEventEffects,
   generateMarketExitEvent, buildExitOfferEvent, checkPromiseDeadlines,
+  generateCareerEvent, generatePrensaEvent, generateLegacyEvent,
 } from '../data/lifeEvents.js'
 import {
   checkDtDelMes, checkDtDelAnio, updateWinStreakRecord, makeCelebration, checkRepTierUp,
@@ -1126,9 +1127,17 @@ const useGame = create(
         if (!player) { set({ contractNegotiation: null }); return }
 
         const finalizeContract = (wage, years) => {
+          // +1: la cuenta regresiva de contrato descuenta un año una sola vez
+          // por temporada (en el fin de temporada), sin importar en qué
+          // momento del año renovaste. Si el jugador ya estaba en yearsLeft:1
+          // y firmás "1 año más", sin este +1 quedaría con yearsLeft:1 de
+          // nuevo — el mismo valor que tenía antes de renovar — y se iría
+          // gratis en el mismo límite de temporada como si nunca hubieras
+          // renovado. El +1 asegura que renovar siempre compre al menos una
+          // temporada completa de aire, sin cambiar lo que el jugador pidió.
           const updatedClubs = clubs.map(c =>
             c.id === currentJob.clubId
-              ? { ...c, squad: c.squad.map(p => p.id === player.id ? { ...p, contract: { yearsLeft: years, wage } } : p) }
+              ? { ...c, squad: c.squad.map(p => p.id === player.id ? { ...p, contract: { yearsLeft: years + 1, wage } } : p) }
               : c
           )
           set({
@@ -2569,11 +2578,25 @@ const useGame = create(
           }
           // ────────────────────────────────────────────────────────────────────
 
-          // ── Vestuario / mercado events (life-event system — src/data/lifeEvents.js) ──
+          // ── Vestuario / carrera / mercado events (life-event system — src/data/lifeEvents.js) ──
+          // Carrera va entre mercado (rarísimo) y vestuario (frecuente) para
+          // que tenga una chance real de ganar la cadena sin apagar vestuario.
           if (newJob && !newPressConference && notifMd - lastLifeEventMd >= 3) {
             const pcEvt = updatedClubs.find(c => c.id === currentJob.clubId)
             const playerGoalDiff = playerMatchResult.playerGoals - playerMatchResult.opponentGoals
-            const newEvent = pcEvt ? (generateMarketExitEvent(pcEvt) || generateVestuarioEvent(pcEvt, { playerGoalDiff })) : null
+            const careerCtx = {
+              allClubs: updatedClubs, repNow: newCoach.reputation, boardConfidence: newJob.boardConfidence,
+              contractEndSeason: currentJob.contractEndSeason, season, hasActiveInterest: !!newCoachInterest,
+            }
+            const prensaCtx = { repNow: newCoach.reputation, boardConfidence: newJob.boardConfidence, playerGoalDiff }
+            const legacyCtx = { seasonsManaged: newCoach.seasonsManaged, trophiesCount: newCoach.trophies.length, streak }
+            const newEvent = pcEvt ? (
+              generateMarketExitEvent(pcEvt) ||
+              generateCareerEvent(pcEvt, careerCtx) ||
+              generatePrensaEvent(pcEvt, prensaCtx) ||
+              generateLegacyEvent(pcEvt, legacyCtx) ||
+              generateVestuarioEvent(pcEvt, { playerGoalDiff })
+            ) : null
 
             if (newEvent) {
               newLifeEvents = [...newLifeEvents, newEvent]
@@ -3357,7 +3380,7 @@ const useGame = create(
       // ── Life events (generic — see src/data/lifeEvents.js) ────────────────────
 
       respondToLifeEvent(optionIndex) {
-        const { lifeEvents, currentJob, clubs, coach, leagues, foreignLeague, season } = get()
+        const { lifeEvents, currentJob, clubs, coach, leagues, foreignLeague, season, notifications } = get()
         const event = lifeEvents[0]
         if (!event) return
         const remaining = lifeEvents.slice(1)
@@ -3414,13 +3437,41 @@ const useGame = create(
             }),
           }
         })
+        // ── "Firmar" en carrera_contrato_presion — extiende el contrato actual.
         const newJob = {
           ...currentJob,
           boardConfidence: clamp(currentJob.boardConfidence + boardConfidenceDelta, 0, 100),
+          ...(effects.contractYears ? { contractEndSeason: currentJob.contractEndSeason + effects.contractYears } : {}),
         }
         const newCoach = reputationDelta !== 0
           ? { ...coach, reputation: clamp(coach.reputation + reputationDelta, 0, 100) }
           : coach
+
+        // ── "Escuchar" en carrera_tentacion_secreta / carrera_club_historico_crisis
+        // — siembra un rumor de interés real (mismo shape que el sistema pasivo
+        // de coachInterest en simulateMatchday); la escalada a oferta formal la
+        // sigue manejando ese código sin cambios.
+        let newCoachInterest = get().coachInterest
+        let newNotifications = notifications
+        if (effects.startCoachInterest) {
+          const { clubId, prestige } = effects.startCoachInterest
+          const suitor = clubs.find(c => c.id === clubId)
+          const activeLg = foreignLeague || leagues[club?.leagueId]
+          newCoachInterest = {
+            clubId,
+            clubName: suitor?.name || 'el club interesado',
+            prestige: prestige ?? suitor?.prestige ?? 0,
+            salary: Math.floor((prestige ?? suitor?.prestige ?? 0) * 900 + 6000),
+            rumorMatchday: activeLg?.currentMatchday || 0,
+            rumorSeason: season,
+          }
+          newNotifications = [...notifications, {
+            id: Date.now() + 700,
+            category: 'interest',
+            text: `Dejaste la puerta abierta con ${newCoachInterest.clubName} — a ver qué pasa`,
+            read: false, season, matchday: activeLg?.currentMatchday || 0,
+          }]
+        }
 
         const parts = []
         if (playerMoraleDelta > 0) parts.push(`Ánimo +${playerMoraleDelta}`)
@@ -3433,6 +3484,8 @@ const useGame = create(
         if (reputationDelta < 0) parts.push(`Reputación ${reputationDelta}`)
         if (promise) parts.push('Promesa pendiente')
         if (effects.transferListed) parts.push('Transferible')
+        if (effects.contractYears) parts.push(`Contrato +${effects.contractYears} años`)
+        if (effects.startCoachInterest) parts.push('Diálogo abierto')
         const evText = parts.join(' · ') || 'Conversación sin efecto inmediato'
         const netDelta = playerMoraleDelta + clubMoraleDelta
         const evType = netDelta > 0 ? 'success' : netDelta < 0 ? 'danger' : 'info'
@@ -3441,6 +3494,8 @@ const useGame = create(
           clubs: updatedClubs,
           currentJob: newJob,
           coach: newCoach,
+          coachInterest: newCoachInterest,
+          notifications: newNotifications,
           lifeEvents: remaining,
           events: [{ id: Date.now(), text: evText, type: evType }],
         })
