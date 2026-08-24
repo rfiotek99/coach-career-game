@@ -5,22 +5,41 @@ import {
   getObjective, canApplyToClub, randomName, rng,
   FINANCE, calcPlayerWage, calcSponsorRevenue, calcTicketRevenue,
   calcBoardInvestment, calcPrizeMoney, generateSquad,
-  STARTING_PROFILES,
+  STARTING_PROFILES, assignInitialContract, calcAskingWage, calcAskingYears,
 } from '../data/gameData.js'
-import { WORLD_CLUBS, WORLD_LEAGUES, resolveFinanceLeagueId } from '../data/worldData.js'
+import { WORLD_CLUBS, WORLD_LEAGUES, resolveFinanceLeagueId, getCountriesByContinent } from '../data/worldData.js'
+import { DEFAULT_TACTICS } from '../data/tactics.js'
+import { generateYouthIntake } from '../data/academy.js'
 import {
   generateSchedule, calcStandings, simulateMatch,
   calcStrength, calcRepDelta, calcConfidenceDelta,
   checkObjective, objectiveRepBonus,
   simulateLightweightMatch, getLightweightFixtures,
   simulateMixedMatch,
-  assignPotential, developPlayers,
+  assignPotential, developPlayers, applyYouthCamp,
   getEffectiveStarters, tickDownStatus, generateMatchEvents,
   calcTransferValue, getTransferWindow, runAITransfers,
+  getNextWindowCloseMatchday, attributeMatchGoals,
 } from '../engine/sim.js'
 import {
   calcStreak, generateMatchdayHeadlines, triggerPressConference, PRESS_CONFERENCES,
 } from '../data/pressData.js'
+import {
+  selectContinentalCupTeams, drawGroups, simulateGroupMatchday, getQualifiers,
+  drawKnockoutBracket, simulateKnockoutRound, getGroupMatchdayFixtures,
+} from '../engine/cup.js'
+import {
+  createLiveMatch, simulateLiveMinute,
+  applyLiveSub as engineApplyLiveSub, setLiveMentality as engineSetLiveMentality,
+} from '../engine/liveMatch.js'
+import {
+  generateVestuarioEvent, getCharlaEvent, resolveLifeEventEffects,
+  generateMarketExitEvent, buildExitOfferEvent, checkPromiseDeadlines,
+} from '../data/lifeEvents.js'
+import {
+  checkDtDelMes, checkDtDelAnio, updateWinStreakRecord, makeCelebration, checkRepTierUp,
+  addScorerEvents,
+} from '../data/history.js'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -79,6 +98,39 @@ function getClubsMap(clubs) {
   return Object.fromEntries(clubs.map(c => [c.id, c]))
 }
 
+// djb2 — mismo patrón que ya usan sim.js/history.js para ids -> seed determinístico
+function hashClubId(str) {
+  let h = 5381
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i)
+  return h >>> 0
+}
+
+// Extracts scorer events for one side from a committed live match's `scorers`
+// list (see liveMatch.js) in the same shape assignGoalScorers() returns, so
+// both paths (rápido/en vivo) feed addScorerEvents identically. Defensive
+// against `liveResult.scorers` being absent (older saves, or mid-rollout).
+function scorersFromLiveResult(liveResult, side) {
+  return (liveResult?.scorers || [])
+    .filter(e => e.side === side)
+    .map(e => ({ scorerId: e.scorerId, scorerName: e.scorerName, assistId: e.assistId, assistName: e.assistName }))
+}
+
+// Looks up a club for the live-match engine: the store's own clubs first
+// (has a real squad), falling back to the static WORLD_CLUBS entry (background
+// AI opponent with only .strength, no squad) — same fallback simulateMixedMatch uses.
+// worldClubSquads (opcional): si el club es del exterior y ya tenemos su
+// plantel cacheado (ensureWorldClubSquad), lo componemos acá — así
+// calcStrength usa el plantel real en vez de caer al fallback plano (40).
+// Parámetro opcional y con default {} — los call sites que no lo pasan
+// se comportan exactamente igual que antes.
+function resolveLiveClub(clubId, clubs, worldClubSquads = {}) {
+  const domestic = clubs.find(c => c.id === clubId)
+  if (domestic) return domestic
+  const worldClub = WORLD_CLUBS.find(c => c.id === clubId)
+  if (!worldClub) return null
+  return worldClubSquads[clubId] ? { ...worldClub, squad: worldClubSquads[clubId] } : worldClub
+}
+
 const AI_FORMATIONS = ['4-4-2','4-3-3','4-2-3-1','3-5-2','5-3-2']
 
 // ── World league helpers ──────────────────────────────────────────────────────
@@ -123,6 +175,427 @@ WORLD_CLUBS.forEach(c => {
   WORLD_CLUBS_BY_LEAGUE[c.leagueId][c.id] = c
 })
 
+// ── Copas continentales + Mundial de Clubes ───────────────────────────────────
+// CUP_ROUND_NAME/CUP_REWARDS están keyed por TAMAÑO de ronda (16/8/4/2), no por
+// continente — una ronda de 8 equipos es "Cuartos de Final" sea cual sea el
+// continente que arrancó ahí, así que el mismo lookup sirve para las 3 copas
+// sin cambios.
+const CUP_REWARDS = {
+  qualifyGroup: { rep: 1, money: 0 },
+  round16:      { rep: 2, money: 40_000 },
+  quarters:     { rep: 2, money: 80_000 },
+  semis:        { rep: 3, money: 150_000 },
+  champion:     { rep: 8, money: 500_000 },
+  runnerUp:     { rep: 4, money: 200_000 },
+}
+const CUP_ROUND_NAME = { 16: 'Octavos de Final', 8: 'Cuartos de Final', 4: 'Semifinal', 2: 'Final' }
+
+const CONTINENTAL_CUP_CONFIG = {
+  europa:       { name: 'Copa Europea',        targetSize: 32, maxPerCountry: 8, includeArgentina: false },
+  sudamerica:   { name: 'Copa Sudamericana',   targetSize: 16, maxPerCountry: 8, includeArgentina: true },
+  norteamerica: { name: 'Copa Norteamericana', targetSize: 8,  maxPerCountry: 8, includeArgentina: false },
+}
+
+// Avanza UNA copa continental un paso cada dos llamadas (crea el torneo en la
+// primera si no existe). Misma mecánica que la vieja Copa Internacional única
+// — grupos → eliminación — parametrizada por continente en vez de duplicada.
+function advanceSingleCup(continentId, cup, clubs, coach, season, playerClubId, records, playerOverride = null) {
+  const config = CONTINENTAL_CUP_CONFIG[continentId]
+  const competitionId = `copa-${continentId}`
+  const competitionName = config.name
+  const notifications = []
+  const celebrations = []
+  const cupGoalEvents = []
+  let toastEvent = null
+  let updatedClubs = clubs
+  let updatedCoach = coach
+
+  if (!cup) {
+    const seed = Date.now() + season * 7919 + continentId.length * 131
+    const countryIds = getCountriesByContinent(continentId)
+    const extraCandidates = config.includeArgentina
+      ? clubs.filter(c => c.leagueId === 'liga-premier').map(c => ({ id: c.id, countryId: 'argentina', prestige: c.prestige }))
+      : []
+    const teamIds = selectContinentalCupTeams(
+      config.includeArgentina ? [...countryIds, 'argentina'] : countryIds,
+      config.targetSize, config.maxPerCountry, extraCandidates,
+    )
+    // Cuáles de esos ids son REALMENTE clubes argentinos — no basta con mirar
+    // el string del id más tarde, porque un id de CLUB_TEMPLATES puede
+    // coincidir por casualidad con uno de WORLD_CLUBS (ej. "pumas-fc" existe
+    // en ambos lados). Esta lista se arma en el único momento en que sabemos
+    // con certeza de dónde salió cada id.
+    const argentineTeamIds = teamIds.filter(id => extraCandidates.some(c => c.id === id))
+    const groups = drawGroups(teamIds, seed)
+    cup = { seed, teamIds, argentineTeamIds, groups, groupMd: 0, phase: 'groups', pendingBracket: null, knockout: [], champion: null, tickCount: 0 }
+    if (playerClubId && teamIds.includes(playerClubId)) {
+      notifications.push({
+        id: Date.now() + 1, category: 'milestone',
+        text: `Tu club fue sorteado para la ${competitionName}`,
+        read: false, season, matchday: null,
+      })
+    }
+    // Recién sorteada: no simular todavía. Si lo hiciéramos en el mismo tick,
+    // el primer partido de grupos (que puede ser el del jugador) se resolvería
+    // sin darle chance de elegir rápido/en vivo — getPendingCupMatch() necesita
+    // al menos un tick de margen para poder "espiar" el fixture antes de que
+    // se juegue. La primera fecha se simula recién en la próxima llamada.
+    return { cup, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations, records }
+  }
+
+  if (cup.phase === 'done') {
+    return { cup, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations, records }
+  }
+
+  const tickCount = cup.tickCount + 1
+  if (tickCount % 2 !== 1) {
+    return { cup: { ...cup, tickCount }, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations, records }
+  }
+
+  // Solo mezclamos los clubes argentinos marcados como tales al armar el
+  // sorteo (cup.argentineTeamIds) — NO re-derivarlo de cup.teamIds, porque
+  // un id de CLUB_TEMPLATES puede coincidir por casualidad con uno de
+  // WORLD_CLUBS (ej. "pumas-fc" existe en ambos lados) y el string por sí
+  // solo no alcanza para saber cuál de los dos es el participante real.
+  const cupClubById = Object.fromEntries(
+    [...WORLD_CLUBS, ...updatedClubs.filter(c => cup.argentineTeamIds?.includes(c.id))].map(c => [c.id, c]),
+  )
+  let newCup = { ...cup, tickCount }
+
+  const applyReward = (reward) => {
+    if (!playerClubId) return
+    if (reward.money) {
+      updatedClubs = updatedClubs.map(c => c.id === playerClubId ? { ...c, budget: c.budget + reward.money } : c)
+    }
+    if (reward.rep) {
+      updatedCoach = { ...updatedCoach, reputation: clamp(updatedCoach.reputation + reward.rep, 0, 100) }
+    }
+  }
+
+  if (newCup.phase === 'groups') {
+    const { groups, results } = simulateGroupMatchday(newCup.groups, newCup.groupMd, cupClubById, playerOverride)
+    newCup.groups = groups
+    newCup.groupMd += 1
+
+    // ── Goleadores/asistencias — no-op gratis para los rivales sin plantel ──
+    const cupGoalCtx = { season, competitionId, competitionName }
+    results.forEach(r => {
+      const home = cupClubById[r.homeId]
+      const away = cupClubById[r.awayId]
+      r.homeScorers.forEach(ev => cupGoalEvents.push({ ...cupGoalCtx, clubId: r.homeId, clubName: home?.name || r.homeId, ...ev }))
+      r.awayScorers.forEach(ev => cupGoalEvents.push({ ...cupGoalCtx, clubId: r.awayId, clubName: away?.name || r.awayId, ...ev }))
+    })
+    // ─────────────────────────────────────────────────────────────────────
+
+    const myResult = results.find(r => r.homeId === playerClubId || r.awayId === playerClubId)
+    if (myResult) {
+      const isHome = myResult.homeId === playerClubId
+      const pg = isHome ? myResult.homeGoals : myResult.awayGoals
+      const og = isHome ? myResult.awayGoals : myResult.homeGoals
+      const oppId = isHome ? myResult.awayId : myResult.homeId
+      const oppName = cupClubById[oppId]?.name || oppId
+      notifications.push({
+        id: Date.now() + 2, category: 'milestone',
+        text: `${competitionName} (Grupo ${myResult.groupLetter}): ${pg > og ? 'Ganaste' : pg === og ? 'Empataste' : 'Perdiste'} ${pg}-${og} vs ${oppName}`,
+        read: false, season, matchday: null,
+      })
+    }
+
+    if (newCup.groupMd >= 3) {
+      const qualifiers = getQualifiers(newCup.groups)
+      newCup.pendingBracket = drawKnockoutBracket(qualifiers, newCup.seed)
+      newCup.phase = 'knockout'
+
+      if (playerClubId) {
+        if (qualifiers.some(q => q.clubId === playerClubId)) {
+          applyReward(CUP_REWARDS.qualifyGroup)
+          notifications.push({
+            id: Date.now() + 3, category: 'milestone',
+            text: `🏆 Clasificaste a la fase eliminatoria de la ${competitionName}`,
+            read: false, season, matchday: null,
+          })
+        } else if (newCup.teamIds.includes(playerClubId)) {
+          notifications.push({
+            id: Date.now() + 3, category: 'milestone',
+            text: `Quedaste eliminado de la ${competitionName} en fase de grupos`,
+            read: false, season, matchday: null,
+          })
+        }
+      }
+    }
+  } else if (newCup.phase === 'knockout' && newCup.pendingBracket) {
+    const roundSize = newCup.pendingBracket.length
+    const { winners, ties } = simulateKnockoutRound(newCup.pendingBracket, cupClubById, playerOverride)
+    newCup.knockout = [...newCup.knockout, { size: roundSize, ties }]
+
+    // ── Goleadores/asistencias ──────────────────────────────────────────────
+    const cupGoalCtx = { season, competitionId, competitionName }
+    ties.forEach(t => {
+      const home = cupClubById[t.homeId]
+      const away = cupClubById[t.awayId]
+      t.homeScorers.forEach(ev => cupGoalEvents.push({ ...cupGoalCtx, clubId: t.homeId, clubName: home?.name || t.homeId, ...ev }))
+      t.awayScorers.forEach(ev => cupGoalEvents.push({ ...cupGoalCtx, clubId: t.awayId, clubName: away?.name || t.awayId, ...ev }))
+    })
+    // ─────────────────────────────────────────────────────────────────────
+
+    const myTie = ties.find(t => t.homeId === playerClubId || t.awayId === playerClubId)
+    const roundName = CUP_ROUND_NAME[roundSize] || `Ronda de ${roundSize}`
+
+    if (winners.length === 1) {
+      newCup.champion = winners[0]
+      newCup.phase = 'done'
+      newCup.pendingBracket = null
+
+      if (playerClubId === newCup.champion) {
+        applyReward(CUP_REWARDS.champion)
+        updatedCoach = {
+          ...updatedCoach,
+          trophies: [...(updatedCoach.trophies || []), {
+            season, leagueId: competitionId, clubId: playerClubId, clubName: cupClubById[playerClubId]?.name,
+          }],
+        }
+        celebrations.push(makeCelebration({
+          type: 'continental-cup-title', icon: '🌎',
+          title: `¡CAMPEÓN DE LA ${competitionName.toUpperCase()}!`,
+          subtitle: cupClubById[playerClubId]?.name || '',
+          detail: `Temporada ${season}`,
+        }))
+        notifications.push({
+          id: Date.now() + 5, category: 'milestone',
+          text: `🏆 ¡Ganaste la ${competitionName}! Clasificaste al Mundial de Clubes`,
+          read: false, season, matchday: null,
+        })
+      } else if (myTie) {
+        applyReward(CUP_REWARDS.runnerUp)
+        notifications.push({
+          id: Date.now() + 5, category: 'milestone',
+          text: `Subcampeón de la ${competitionName} — gran temporada igual`,
+          read: false, season, matchday: null,
+        })
+      }
+    } else {
+      newCup.pendingBracket = winners
+      if (myTie) {
+        if (myTie.winner === playerClubId) {
+          const wonReward = roundSize === 16 ? CUP_REWARDS.round16 : roundSize === 8 ? CUP_REWARDS.quarters : CUP_REWARDS.semis
+          applyReward(wonReward)
+          notifications.push({
+            id: Date.now() + 5, category: 'milestone',
+            text: `🏆 Avanzaste a ${CUP_ROUND_NAME[winners.length] || 'la siguiente ronda'} de la ${competitionName}`,
+            read: false, season, matchday: null,
+          })
+          toastEvent = { id: Date.now() + 6, text: `¡Avanzaste en la ${competitionName}! (${roundName})`, type: 'success' }
+        } else {
+          notifications.push({
+            id: Date.now() + 5, category: 'milestone',
+            text: `Quedaste eliminado de la ${competitionName} en ${roundName}`,
+            read: false, season, matchday: null,
+          })
+        }
+      }
+    }
+  }
+
+  return {
+    cup: newCup, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations,
+    records: addScorerEvents(records, cupGoalEvents),
+  }
+}
+
+// ── Mundial de Clubes ─────────────────────────────────────────────────────────
+// Liguilla simple todos-contra-todos entre los (hasta 3) campeones
+// continentales — con tan pocos participantes no tiene sentido forzar el
+// bracket de grupos+eliminación de cup.js, pero sí reutiliza
+// simulateMixedMatch/attributeMatchGoals (mismo motor de partido).
+const WORLD_CUP_REWARDS = {
+  champion: { rep: 12, money: 800_000 },
+  runnerUp: { rep: 6, money: 300_000 },
+}
+
+function createWorldCup(champions, season) {
+  const valid = champions.filter(c => c.clubId)
+  const fixtures = []
+  for (let i = 0; i < valid.length; i++) {
+    for (let j = i + 1; j < valid.length; j++) {
+      fixtures.push({ homeId: valid[i].clubId, awayId: valid[j].clubId })
+    }
+  }
+  return {
+    season, champions: valid, fixtures, results: [], nextFixtureIdx: 0,
+    table: Object.fromEntries(valid.map(c => [c.clubId, { clubId: c.clubId, pts: 0, gf: 0, ga: 0, played: 0 }])),
+    phase: fixtures.length ? 'active' : 'done',
+    champion: fixtures.length ? null : (valid[0]?.clubId || null),
+    tickCount: 0,
+  }
+}
+
+// Un partido de la liguilla cada dos llamadas — misma cadencia que las copas
+// continentales, para que el ritmo se sienta parejo. playerOverride — mismo
+// shape que en advanceSingleCup — sustituye el resultado del ÚNICO fixture
+// del jugador (ya resuelto rápido o en vivo vía getPendingCupMatch/
+// startCupLiveMatch/commitCupLiveMatch, con continentId 'mundial').
+function advanceWorldCup(worldCup, clubs, coach, season, playerClubId, playerOverride = null) {
+  const notifications = []
+  const celebrations = []
+  let toastEvent = null
+  let updatedClubs = clubs
+  let updatedCoach = coach
+
+  if (worldCup.phase === 'done' || worldCup.nextFixtureIdx >= worldCup.fixtures.length) {
+    return { worldCup, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations }
+  }
+
+  const tickCount = worldCup.tickCount + 1
+  if (tickCount % 2 !== 1) {
+    return { worldCup: { ...worldCup, tickCount }, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations }
+  }
+
+  // Mismo criterio que advanceSingleCup: solo mezclamos clubes marcados como
+  // argentinos (worldCup.champions[].isArgentine), no re-derivarlo del id.
+  const argentineChampionIds = worldCup.champions.filter(c => c.isArgentine).map(c => c.clubId)
+  const clubById = Object.fromEntries(
+    [...WORLD_CLUBS, ...updatedClubs.filter(c => argentineChampionIds.includes(c.id))].map(c => [c.id, c]),
+  )
+  const fixture = worldCup.fixtures[worldCup.nextFixtureIdx]
+  const home = clubById[fixture.homeId]
+  const away = clubById[fixture.awayId]
+  const isPlayerFixture = playerOverride && (fixture.homeId === playerOverride.clubId || fixture.awayId === playerOverride.clubId)
+  const res = isPlayerFixture
+    ? { homeGoals: playerOverride.homeGoals, awayGoals: playerOverride.awayGoals }
+    : simulateMixedMatch(home, away)
+  const { homeScorers, awayScorers } = isPlayerFixture
+    ? { homeScorers: playerOverride.homeScorers || [], awayScorers: playerOverride.awayScorers || [] }
+    : attributeMatchGoals(home, away, res.homeGoals, res.awayGoals)
+
+  const newTable = { ...worldCup.table }
+  const h = { ...newTable[fixture.homeId] }
+  const a = { ...newTable[fixture.awayId] }
+  h.gf += res.homeGoals; h.ga += res.awayGoals; h.played++
+  a.gf += res.awayGoals; a.ga += res.homeGoals; a.played++
+  if (res.homeGoals > res.awayGoals) h.pts += 3
+  else if (res.homeGoals < res.awayGoals) a.pts += 3
+  else { h.pts++; a.pts++ }
+  newTable[fixture.homeId] = h
+  newTable[fixture.awayId] = a
+
+  const newResults = [...worldCup.results, { ...fixture, homeGoals: res.homeGoals, awayGoals: res.awayGoals, homeScorers, awayScorers }]
+  const nextIdx = worldCup.nextFixtureIdx + 1
+
+  if (fixture.homeId === playerClubId || fixture.awayId === playerClubId) {
+    const isHome = fixture.homeId === playerClubId
+    const pg = isHome ? res.homeGoals : res.awayGoals
+    const og = isHome ? res.awayGoals : res.homeGoals
+    const oppName = clubById[isHome ? fixture.awayId : fixture.homeId]?.name || ''
+    notifications.push({
+      id: Date.now() + 200, category: 'milestone',
+      text: `Mundial de Clubes: ${pg > og ? 'Ganaste' : pg === og ? 'Empataste' : 'Perdiste'} ${pg}-${og} vs ${oppName}`,
+      read: false, season, matchday: null,
+    })
+    toastEvent = { id: Date.now() + 201, text: `Mundial de Clubes: ${pg}-${og} vs ${oppName}`, type: pg >= og ? 'success' : 'warn' }
+  }
+
+  const newWorldCup = { ...worldCup, tickCount, table: newTable, results: newResults, nextFixtureIdx: nextIdx }
+
+  if (nextIdx >= worldCup.fixtures.length) {
+    const standings = Object.values(newTable).sort((a, b) =>
+      b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf
+    )
+    const championId = standings[0]?.clubId || null
+    newWorldCup.phase = 'done'
+    newWorldCup.champion = championId
+
+    if (playerClubId === championId) {
+      updatedClubs = updatedClubs.map(c => c.id === playerClubId ? { ...c, budget: c.budget + WORLD_CUP_REWARDS.champion.money } : c)
+      updatedCoach = {
+        ...updatedCoach,
+        reputation: clamp(updatedCoach.reputation + WORLD_CUP_REWARDS.champion.rep, 0, 100),
+        trophies: [...(updatedCoach.trophies || []), {
+          season, leagueId: 'mundial-de-clubes', clubId: playerClubId, clubName: clubById[playerClubId]?.name,
+        }],
+      }
+      celebrations.push(makeCelebration({
+        type: 'world-cup-title', icon: '🌍',
+        title: '¡CAMPEÓN DEL MUNDO!',
+        subtitle: clubById[playerClubId]?.name || '',
+        detail: `Mundial de Clubes · Temporada ${season}`,
+      }))
+      notifications.push({
+        id: Date.now() + 300, category: 'milestone',
+        text: '🌍🏆 ¡CAMPEÓN DEL MUNDIAL DE CLUBES! El máximo título de tu carrera',
+        read: false, season, matchday: null,
+      })
+    } else if (standings.some(s => s.clubId === playerClubId)) {
+      updatedClubs = updatedClubs.map(c => c.id === playerClubId ? { ...c, budget: c.budget + WORLD_CUP_REWARDS.runnerUp.money } : c)
+      updatedCoach = { ...updatedCoach, reputation: clamp(updatedCoach.reputation + WORLD_CUP_REWARDS.runnerUp.rep, 0, 100) }
+      notifications.push({
+        id: Date.now() + 300, category: 'milestone',
+        text: 'Terminaste subcampeón del Mundial de Clubes',
+        read: false, season, matchday: null,
+      })
+    }
+  }
+
+  return { worldCup: newWorldCup, clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations }
+}
+
+// ── Orquestador: avanza las 3 copas continentales + el Mundial ───────────────
+// Llamado una vez por simulateMatchday, igual que la vieja advanceCup.
+function advanceContinentalCups(continentalCups, worldCup, clubs, coach, season, playerClubId, records, pendingCupResult = null) {
+  const notifications = []
+  const celebrations = []
+  let toastEvent = null
+  let updatedClubs = clubs
+  let updatedCoach = coach
+  let updatedRecords = records
+  const newContinentalCups = {}
+
+  for (const continentId of Object.keys(CONTINENTAL_CUP_CONFIG)) {
+    const playerOverride = pendingCupResult?.continentId === continentId
+      ? { clubId: pendingCupResult.clubId, homeGoals: pendingCupResult.homeGoals, awayGoals: pendingCupResult.awayGoals, homeScorers: pendingCupResult.homeScorers, awayScorers: pendingCupResult.awayScorers }
+      : null
+    const result = advanceSingleCup(continentId, continentalCups[continentId], updatedClubs, updatedCoach, season, playerClubId, updatedRecords, playerOverride)
+    newContinentalCups[continentId] = result.cup
+    updatedClubs = result.clubs
+    updatedCoach = result.coach
+    updatedRecords = result.records
+    notifications.push(...result.notifications)
+    celebrations.push(...result.celebrations)
+    if (result.toastEvent && !toastEvent) toastEvent = result.toastEvent
+  }
+
+  let newWorldCup = worldCup
+  const allContinentalDone = Object.values(newContinentalCups).every(c => c?.phase === 'done')
+  if (allContinentalDone && !newWorldCup) {
+    const champions = Object.entries(newContinentalCups).map(([continentId, c]) => ({
+      continentId, clubId: c.champion, isArgentine: !!c.argentineTeamIds?.includes(c.champion),
+    }))
+    newWorldCup = createWorldCup(champions, season)
+    if (playerClubId && champions.some(c => c.clubId === playerClubId)) {
+      notifications.push({
+        id: Date.now() + 100, category: 'milestone',
+        text: '🌍 ¡Clasificaste al Mundial de Clubes!',
+        read: false, season, matchday: null,
+      })
+    }
+  } else if (newWorldCup && newWorldCup.phase !== 'done') {
+    const worldCupOverride = pendingCupResult?.continentId === 'mundial'
+      ? { clubId: pendingCupResult.clubId, homeGoals: pendingCupResult.homeGoals, awayGoals: pendingCupResult.awayGoals, homeScorers: pendingCupResult.homeScorers, awayScorers: pendingCupResult.awayScorers }
+      : null
+    const wcResult = advanceWorldCup(newWorldCup, updatedClubs, updatedCoach, season, playerClubId, worldCupOverride)
+    newWorldCup = wcResult.worldCup
+    updatedClubs = wcResult.clubs
+    updatedCoach = wcResult.coach
+    notifications.push(...wcResult.notifications)
+    celebrations.push(...wcResult.celebrations)
+    if (wcResult.toastEvent && !toastEvent) toastEvent = wcResult.toastEvent
+  }
+
+  return {
+    continentalCups: newContinentalCups, worldCup: newWorldCup,
+    clubs: updatedClubs, coach: updatedCoach, notifications, toastEvent, celebrations, records: updatedRecords,
+  }
+}
+
 // ── Transfer helpers (pure, outside store) ────────────────────────────────────
 
 function computeAIResponse(player, sellerClub, buyerClub, amount) {
@@ -150,10 +623,44 @@ function computeAIResponse(player, sellerClub, buyerClub, amount) {
   return { decision, counterAmount, reason: null }
 }
 
+// Misma forma que computeAIResponse, pero del lado del jugador negociando su
+// renovación: ratio de sueldo ofrecido vs. pedido, penalizado si además se
+// ofrecen menos años de los que pide. `askWage`/`askYears` es lo que el
+// jugador viene pidiendo en esta ronda (converge hacia la oferta si contraofertea).
+function computePlayerContractResponse(offerWage, offerYears, askWage, askYears) {
+  const wageRatio = offerWage / askWage
+  const yearsGap = askYears - offerYears
+
+  let acceptP, counterP
+  if (wageRatio < 0.75) { acceptP = 0.05; counterP = 0.55 }
+  else if (wageRatio < 0.90) { acceptP = 0.25; counterP = 0.55 }
+  else if (wageRatio < 1.0) { acceptP = 0.55; counterP = 0.35 }
+  else { acceptP = 0.85; counterP = 0.13 }
+
+  if (yearsGap >= 2) {
+    acceptP = Math.max(0, acceptP - 0.25)
+    counterP = Math.min(1 - acceptP, counterP + 0.15)
+  } else if (yearsGap === 1) {
+    acceptP = Math.max(0, acceptP - 0.10)
+  } else if (yearsGap < 0) {
+    acceptP = Math.min(1, acceptP + 0.05)
+  }
+
+  const r = Math.random()
+  const decision = r < acceptP ? 'accepted' : r < acceptP + counterP ? 'countered' : 'rejected'
+  if (decision !== 'countered') return { decision, counterWage: null, counterYears: null }
+
+  const mult = wageRatio < 0.75 ? 1.20 : wageRatio < 0.90 ? 1.10 : 1.04
+  const counterWage = Math.round((offerWage * mult) / 10) * 10
+  const counterYears = yearsGap > 0 ? Math.max(offerYears, askYears - 1) : askYears
+  return { decision, counterWage, counterYears }
+}
+
 function doTransfer(clubs, buyerClubId, sellerClubId, player, amount) {
   return clubs.map(c => {
     if (c.id === buyerClubId) {
-      return { ...c, budget: c.budget - amount, squad: [...c.squad, { ...player, clubId: buyerClubId }] }
+      const signedPlayer = { ...player, clubId: buyerClubId, contract: assignInitialContract(player) }
+      return { ...c, budget: c.budget - amount, squad: [...c.squad, signedPlayer] }
     }
     if (c.id === sellerClubId) {
       return {
@@ -165,6 +672,34 @@ function doTransfer(clubs, buyerClubId, sellerClubId, player, amount) {
     }
     return c
   })
+}
+
+// Resuelve un club vendedor para el mercado: doméstico (vive en `clubs`) o del
+// mundo (WORLD_CLUBS + worldClubSquads, cacheado por ensureWorldClubSquad —
+// nunca genera acá, solo lee lo que ya esté cacheado).
+function resolveMarketSeller(clubId, clubs, worldClubSquads) {
+  const domestic = clubs.find(c => c.id === clubId)
+  if (domestic) return { club: domestic, isWorld: false }
+  const worldClub = WORLD_CLUBS.find(c => c.id === clubId)
+  if (!worldClub) return { club: null, isWorld: false }
+  return { club: { ...worldClub, squad: worldClubSquads[clubId] || [] }, isWorld: true }
+}
+
+// Como doTransfer, pero el vendedor es un club del mundo — no vive en `clubs`
+// (no tiene presupuesto propio simulado), solo se le saca el jugador de su
+// plantel cacheado en worldClubSquads.
+function doTransferFromWorld(clubs, worldClubSquads, buyerClubId, sellerClubId, player, amount) {
+  const updatedClubs = clubs.map(c =>
+    c.id === buyerClubId
+      ? { ...c, budget: c.budget - amount, squad: [...c.squad, { ...player, clubId: buyerClubId, contract: assignInitialContract(player) }] }
+      : c
+  )
+  const sellerSquad = worldClubSquads[sellerClubId] || []
+  const updatedWorldClubSquads = {
+    ...worldClubSquads,
+    [sellerClubId]: sellerSquad.filter(p => p.id !== player.id),
+  }
+  return { clubs: updatedClubs, worldClubSquads: updatedWorldClubSquads }
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -190,6 +725,11 @@ const useGame = create(
       worldInitialized: false,
       detailedCountryId: 'argentina',
 
+      // Copas continentales + Mundial de Clubes
+      continentalCups: { europa: null, sudamerica: null, norteamerica: null },
+      // { seed, teamIds, groups, groupMd, phase, pendingBracket, knockout, champion } | null, por continente
+      worldCup: null, // { season, champions, fixtures, results, nextFixtureIdx, table, phase, champion } | null
+
       // Job
       currentJob: null,  // { clubId, objective, boardConfidence, salary, contractEndSeason }
       foreignLeague: null, // { leagueId, schedule, currentMatchday, totalMatchdays, completed }
@@ -198,11 +738,38 @@ const useGame = create(
       events: [],        // { id, text, type } – shown as toast or log
       notifications: [], // { id, category, text, read, season, matchday, requiresAction, actionType, actionPayload } – persistent history
       coachInterest: null,    // { clubId, clubName, prestige, salary, rumorMatchday, rumorSeason } | null
-      playerDiscontent: null, // { playerId, playerName, playerSkill, playerPos, matchdaysOnBench } | null
       matchReport: null, // last simulated matchday's results
+
+      // Life events (extensible: vestuario now, prensa/vida personal/hinchada later)
+      lifeEvents: [],      // queue — front item shown in LifeEventModal, see src/data/lifeEvents.js
+      lastLifeEventMd: 0,  // cooldown tracker for automatic events
+
+      // Live match (player's own fixture, played out minute by minute)
+      liveMatch: null, // { minute, homeGoals, awayGoals, homeClubId, awayClubId, homeLineup, awayLineup, homeFatigue, awayFatigue, homeMentality, awayMentality, playerSide, subsUsed, events, cardEvents, finished, kind?, continentId? } | null
+
+      // Cup match already resolved (quick or live) this turn, staged until the
+      // league fixture also resolves and simulateMatchday() consumes it — see
+      // commitCupLiveMatch/getPendingCupMatch.
+      pendingCupResult: null, // { continentId, clubId, homeGoals, awayGoals, homeScorers, awayScorers, cardEvents } | null
 
       // Season end data
       seasonEndData: null,
+
+      // Preseason friendlies played this preseason (quick or live), staged
+      // until finishPreseason() clears them along with the rest of the
+      // preseason UI — capped at 3, never touches leagues/reputation/history.
+      preseasonFriendlyResults: [], // { id, opponentId, opponentName, homeGoals, awayGoals, isHome }
+
+      // Foco de entrenamiento elegido (todavía sin confirmar) en la pantalla
+      // de Pretemporada. Vive en el store (no en useState local de
+      // PreseasonScreen) porque un amistoso en vivo desmonta esa pantalla —
+      // App.jsx renderiza LiveMatchScreen en su lugar mientras liveMatch esté
+      // activo — y un useState local perdería la selección al volver.
+      preseasonFocusDraft: 'ninguno',
+
+      // Celebrations (queue) — momentos de impacto: título, ascenso, copa,
+      // subida de tier de reputación, premios de DT. Ver src/data/history.js.
+      celebrations: [], // { id, type, icon, title, subtitle, detail }
 
       // Press system
       pressHeadlines: [],    // { id, text, type, matchday, season }
@@ -213,6 +780,26 @@ const useGame = create(
       transferOffers: [],    // { id, type, fromClubId, toClubId, playerId, playerName, ... }
       aiTransferLog: [],     // [ { text, season } ] — log of AI market activity
       transferWindowRan: { verano: false, invierno: false },
+
+      // Contract renewal negotiation (in progress) | null
+      contractNegotiation: null,
+
+      // Market drama: rumors + world "planned" intentions (see simulateMatchday)
+      marketRumors: [],          // { id, kind, text, playerId, playerName, buyerClubId, buyerClubName, season, matchday, status: 'pending'|'confirmed'|'faded' }
+      pendingMarketIntentions: [], // [{ id, buyerClubId, sellerClubId, playerId, resolveSeason }] — AI-AI moves rumored before the window opens
+
+      // World history / palmarés — persists across seasons (never reset in
+      // processSeasonEnd, only on startNewGame/resetGame). See src/data/history.js.
+      worldHistory: { titles: [], movements: [], awards: [], records: {} },
+      lastDtMesMd: 0,
+
+      // Planteles de clubes del mundo — generados bajo demanda (ver
+      // ensureWorldClubSquad) y cacheados acá, nunca los 328 de una.
+      // worldSeed se fija una vez por partida (startNewGame) para que el
+      // plantel de cada club sea estable dentro de la partida pero varíe
+      // entre partidas nuevas.
+      worldClubSquads: {}, // { [clubId]: player[] }
+      worldSeed: 0,
 
       // ── Actions ─────────────────────────────────────────────────────────────
 
@@ -254,17 +841,35 @@ const useGame = create(
           worldLeagues: buildWorldLeagueState(),
           worldInitialized: true,
           detailedCountryId: 'argentina',
+          continentalCups: { europa: null, sudamerica: null, norteamerica: null },
+          worldCup: null,
           currentJob: null,
           foreignLeague: null,
           events: [],
           notifications: [],
           coachInterest: null,
-          playerDiscontent: null,
+          lifeEvents: [],
+          lastLifeEventMd: 0,
           matchReport: null,
+          liveMatch: null,
+          pendingCupResult: null,
           seasonEndData: null,
+          preseasonFriendlyResults: [],
+          preseasonFocusDraft: 'ninguno',
+          celebrations: [],
           pressHeadlines: [],
           pressConference: null,
           lastConferenceMd: 0,
+          transferOffers: [],
+          aiTransferLog: [],
+          transferWindowRan: { verano: false, invierno: false },
+          contractNegotiation: null,
+          marketRumors: [],
+          pendingMarketIntentions: [],
+          worldHistory: { titles: [], movements: [], awards: [], records: {} },
+          lastDtMesMd: 0,
+          worldClubSquads: {},
+          worldSeed: s + 999983,
           coach: {
             name: coachName,
             reputation: profile.startRep,
@@ -310,7 +915,7 @@ const useGame = create(
         if (!worldClub) return
 
         const rand = rng(Date.now() + worldClub.prestige * 37)
-        const squad = generateSquad(clubId, worldClub.prestige, rand)
+        const squad = generateSquad(clubId, worldClub.prestige, rand, worldClub.countryId)
 
         const wl = WORLD_LEAGUES.find(l => l.id === worldClub.leagueId)
         const tierMult = wl?.tier === 1 ? 2.5 : 1.0
@@ -320,6 +925,8 @@ const useGame = create(
           ...worldClub, squad,
           formation: '4-4-2', morale: 65,
           managerId: 'player', starters: [],
+          tactics: { ...DEFAULT_TACTICS },
+          youthSquad: [], youthCounter: 0,
           budget, finances: blankFinances(season),
         }
 
@@ -442,9 +1049,367 @@ const useGame = create(
         })
       },
 
+      // Estilo de juego — instrucciones tácticas persistentes (Mentalidad,
+      // Presión, Ritmo, Ataque). `partial` es un merge parcial, ej.
+      // setTactics({ pressing: 'alta' }) toca solo ese eje.
+      setTactics(partial) {
+        const { clubs, currentJob } = get()
+        if (!currentJob) return
+        set({
+          clubs: clubs.map(c =>
+            c.id === currentJob.clubId
+              ? { ...c, tactics: { ...(c.tactics || DEFAULT_TACTICS), ...partial } }
+              : c
+          ),
+        })
+      },
+
+      // Cantera — sube un juvenil de youthSquad a squad (mismo id/clubId).
+      // A partir de acá es un jugador de plantel más: seleccionable en
+      // táctica/alineación, vendible en el mercado, elegible para partidos —
+      // sin wiring adicional en ningún otro lado.
+      promoteYouthPlayer(playerId) {
+        const { clubs, currentJob } = get()
+        if (!currentJob) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        const player = club?.youthSquad?.find(p => p.id === playerId)
+        if (!player) return
+        const promoted = { ...player, contract: assignInitialContract(player) }
+        set({
+          clubs: clubs.map(c =>
+            c.id === currentJob.clubId
+              ? {
+                  ...c,
+                  squad: [...c.squad, promoted],
+                  youthSquad: c.youthSquad.filter(p => p.id !== playerId),
+                }
+              : c
+          ),
+          events: [{ id: Date.now(), text: `¡${player.name} subió al primer equipo!`, type: 'success' }],
+        })
+      },
+
+      // ── Contratos: renovación negociada ───────────────────────────────────
+      // Abre la negociación con el pedido inicial del jugador (calcAskingWage/
+      // calcAskingYears, coherente con su nivel/edad/moral). No hay plazo de
+      // espera — se puede renovar en cualquier momento, no solo en el último
+      // año de contrato.
+      openContractRenewal(playerId) {
+        const { clubs, currentJob } = get()
+        if (!currentJob) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        const player = club?.squad.find(p => p.id === playerId)
+        if (!player || !player.contract) return
+        set({
+          contractNegotiation: {
+            playerId,
+            clubId: club.id,
+            askWage: calcAskingWage(player),
+            askYears: calcAskingYears(player),
+            round: 1,
+            maxRounds: 3,
+          },
+        })
+      },
+
+      // action: 'accept' (al pedido actual del jugador) | 'counter' (con
+      // offerWage/offerYears propios) | 'reject' (corta la negociación, el
+      // jugador sigue con su contrato viejo). Mismo patrón de rondas que
+      // respondToOutgoingOffer (mercado): tope de rondas fuerza a
+      // aceptar-o-rechazar, computePlayerContractResponse decide si el
+      // jugador acepta, contraoferta o corta.
+      respondContractNegotiation(action, offerWage, offerYears) {
+        const { clubs, currentJob, contractNegotiation } = get()
+        if (!contractNegotiation || !currentJob) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        const player = club?.squad.find(p => p.id === contractNegotiation.playerId)
+        if (!player) { set({ contractNegotiation: null }); return }
+
+        const finalizeContract = (wage, years) => {
+          const updatedClubs = clubs.map(c =>
+            c.id === currentJob.clubId
+              ? { ...c, squad: c.squad.map(p => p.id === player.id ? { ...p, contract: { yearsLeft: years, wage } } : p) }
+              : c
+          )
+          set({
+            clubs: updatedClubs,
+            contractNegotiation: null,
+            events: [{ id: Date.now(), text: `Renovaste a ${player.name} por ${years} año${years > 1 ? 's' : ''} a $${wage}/jornada`, type: 'success' }],
+          })
+        }
+
+        if (action === 'accept') {
+          finalizeContract(contractNegotiation.askWage, contractNegotiation.askYears)
+          return
+        }
+        if (action === 'reject') {
+          set({ contractNegotiation: null })
+          return
+        }
+
+        if (contractNegotiation.round >= contractNegotiation.maxRounds) {
+          set({
+            contractNegotiation: null,
+            events: [{ id: Date.now(), text: `${player.name} se cansó de negociar — sigue con su contrato actual`, type: 'warn' }],
+          })
+          return
+        }
+
+        const { decision, counterWage, counterYears } = computePlayerContractResponse(
+          offerWage, offerYears, contractNegotiation.askWage, contractNegotiation.askYears
+        )
+
+        if (decision === 'accepted') {
+          finalizeContract(offerWage, offerYears)
+        } else if (decision === 'rejected') {
+          set({
+            contractNegotiation: null,
+            events: [{ id: Date.now(), text: `${player.name} rechazó tu oferta y cortó la negociación`, type: 'warn' }],
+          })
+        } else {
+          set({
+            contractNegotiation: { ...contractNegotiation, askWage: counterWage, askYears: counterYears, round: contractNegotiation.round + 1 },
+          })
+        }
+      },
+
+      // ── Live match (player's own fixture, played minute by minute) ───────────
+
+      startLiveMatch() {
+        const { currentJob, clubs } = get()
+        if (!currentJob) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        if (!club) return
+        const fixture = get().getUpcomingMatches(currentJob.clubId, 1)[0]
+        if (!fixture) return
+
+        const isPlayerHome = fixture.homeId === currentJob.clubId
+        const opponentId = isPlayerHome ? fixture.awayId : fixture.homeId
+        const opponentClub = resolveLiveClub(opponentId, clubs)
+        if (!opponentClub) return
+
+        const homeClub = isPlayerHome ? club : opponentClub
+        const awayClub = isPlayerHome ? opponentClub : club
+        const base = createLiveMatch(homeClub, awayClub, isPlayerHome)
+        set({ liveMatch: { ...base, homeClubId: homeClub.id, awayClubId: awayClub.id } })
+      },
+
+      // ── Live match for the player's own continental-cup fixture ──────────────
+      // Same engine as startLiveMatch/commitLiveMatch (tickLiveMatch, applyLiveSub,
+      // setLiveMentality all work unchanged — they only look at homeClubId/awayClubId/
+      // playerSide). The fixture comes from getPendingCupMatch() instead of the
+      // league schedule.
+      startCupLiveMatch() {
+        const { currentJob, clubs } = get()
+        if (!currentJob) return
+        const pending = get().getPendingCupMatch()
+        if (!pending) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        if (!club) return
+
+        const isPlayerHome = pending.isPlayerHome
+        const opponentClub = resolveLiveClub(pending.opponentId, clubs)
+        if (!opponentClub) return
+
+        const homeClub = isPlayerHome ? club : opponentClub
+        const awayClub = isPlayerHome ? opponentClub : club
+        const base = createLiveMatch(homeClub, awayClub, isPlayerHome)
+        set({ liveMatch: { ...base, homeClubId: homeClub.id, awayClubId: awayClub.id, kind: 'cup', continentId: pending.continentId, competitionName: pending.competitionName } })
+      },
+
+      tickLiveMatch(minutes = 1) {
+        const { liveMatch, clubs, worldClubSquads } = get()
+        if (!liveMatch || liveMatch.finished) return
+        const homeClub = resolveLiveClub(liveMatch.homeClubId, clubs, worldClubSquads)
+        const awayClub = resolveLiveClub(liveMatch.awayClubId, clubs, worldClubSquads)
+        if (!homeClub || !awayClub) return
+
+        let next = liveMatch
+        for (let i = 0; i < minutes && !next.finished; i++) {
+          next = simulateLiveMinute(next, homeClub, awayClub)
+        }
+        set({ liveMatch: next })
+      },
+
+      applyLiveSub(outId, inId) {
+        const { liveMatch, clubs, worldClubSquads } = get()
+        if (!liveMatch) return
+        const playerClubId = liveMatch.playerSide === 'home' ? liveMatch.homeClubId : liveMatch.awayClubId
+        const playerClub = resolveLiveClub(playerClubId, clubs, worldClubSquads)
+        const homeClub = resolveLiveClub(liveMatch.homeClubId, clubs, worldClubSquads)
+        const awayClub = resolveLiveClub(liveMatch.awayClubId, clubs, worldClubSquads)
+        if (!playerClub || !homeClub || !awayClub) return
+        set({ liveMatch: engineApplyLiveSub(liveMatch, playerClub, outId, inId, homeClub, awayClub) })
+      },
+
+      setLiveMentality(mentality) {
+        const { liveMatch, clubs, worldClubSquads } = get()
+        if (!liveMatch) return
+        const homeClub = resolveLiveClub(liveMatch.homeClubId, clubs, worldClubSquads)
+        const awayClub = resolveLiveClub(liveMatch.awayClubId, clubs, worldClubSquads)
+        if (!homeClub || !awayClub) return
+        set({ liveMatch: engineSetLiveMentality(liveMatch, mentality, homeClub, awayClub) })
+      },
+
+      commitLiveMatch() {
+        const { liveMatch, currentJob } = get()
+        if (!liveMatch || !liveMatch.finished || !currentJob) return
+        const playerLineup = liveMatch.playerSide === 'home' ? liveMatch.homeLineup : liveMatch.awayLineup
+        const cleanLineup = playerLineup.filter(id => id != null)
+        if (cleanLineup.length === 11) {
+          get().setLineup(cleanLineup)
+        }
+        const liveResult = {
+          homeGoals: liveMatch.homeGoals,
+          awayGoals: liveMatch.awayGoals,
+          cardEvents: liveMatch.cardEvents,
+          scorers: liveMatch.scorers,
+        }
+        set({ liveMatch: null })
+        get().simulateMatchday(liveResult)
+      },
+
+      // Unlike commitLiveMatch, this does NOT call simulateMatchday directly —
+      // the cup fixture is staged in pendingCupResult so the player still gets
+      // to resolve their league fixture (quick or live) afterward; whichever
+      // one triggers simulateMatchday() picks up pendingCupResult automatically.
+      commitCupLiveMatch() {
+        const { liveMatch, currentJob } = get()
+        if (!liveMatch || !liveMatch.finished || !currentJob || liveMatch.kind !== 'cup') return
+        const playerLineup = liveMatch.playerSide === 'home' ? liveMatch.homeLineup : liveMatch.awayLineup
+        const cleanLineup = playerLineup.filter(id => id != null)
+        if (cleanLineup.length === 11) {
+          get().setLineup(cleanLineup)
+        }
+        const homeScorers = liveMatch.scorers.filter(e => e.side === 'home').map(e => ({ scorerId: e.scorerId, scorerName: e.scorerName, assistId: e.assistId, assistName: e.assistName }))
+        const awayScorers = liveMatch.scorers.filter(e => e.side === 'away').map(e => ({ scorerId: e.scorerId, scorerName: e.scorerName, assistId: e.assistId, assistName: e.assistName }))
+        const playerClubId = liveMatch.playerSide === 'home' ? liveMatch.homeClubId : liveMatch.awayClubId
+        set({
+          liveMatch: null,
+          pendingCupResult: {
+            continentId: liveMatch.continentId,
+            clubId: playerClubId,
+            homeGoals: liveMatch.homeGoals,
+            awayGoals: liveMatch.awayGoals,
+            homeScorers, awayScorers,
+            cardEvents: liveMatch.cardEvents,
+          },
+        })
+      },
+
+      // ── Amistosos de pretemporada ─────────────────────────────────────────
+      // No tocan leagues/reputación/confianza/historia en ningún punto — ni
+      // el modo rápido ni el modo en vivo llaman a simulateMatchday(). Tampoco
+      // generan lesiones/tarjetas (no llaman a generateMatchEvents): son de
+      // prueba, no cuentan para nada. Solo dan un empujoncito chico de moral.
+      getPreseasonFriendlyOpponents() {
+        const { currentJob, clubs, foreignLeague } = get()
+        if (!currentJob) return []
+        const myClub = clubs.find(c => c.id === currentJob.clubId)
+        if (!myClub) return []
+        const isWorldJob = !!foreignLeague && !LEAGUES.find(l => l.id === myClub.leagueId)
+        const pool = isWorldJob
+          ? WORLD_CLUBS.filter(c => c.leagueId === myClub.leagueId && c.id !== myClub.id)
+          : clubs.filter(c => c.leagueId === myClub.leagueId && c.id !== myClub.id)
+        return pool
+          .slice()
+          .sort((a, b) => Math.abs(a.prestige - myClub.prestige) - Math.abs(b.prestige - myClub.prestige))
+          .slice(0, 5)
+          .map(c => ({ id: c.id, name: c.name, prestige: c.prestige }))
+      },
+
+      // Resuelve el rival de un amistoso con su plantel real: si es doméstico
+      // ya lo tiene, si es del exterior lo asegura vía ensureWorldClubSquad
+      // (mismo helper que usa el mercado) antes de componerlo.
+      _resolveFriendlyOpponent(opponentId) {
+        const { clubs } = get()
+        const domestic = clubs.find(c => c.id === opponentId)
+        if (domestic) return domestic
+        const worldClub = WORLD_CLUBS.find(c => c.id === opponentId)
+        if (!worldClub) return null
+        get().ensureWorldClubSquad(opponentId)
+        const squad = get().worldClubSquads[opponentId] || []
+        return { ...worldClub, squad }
+      },
+
+      playPreseasonFriendlyQuick(opponentId) {
+        const { screen, currentJob, clubs, preseasonFriendlyResults } = get()
+        if (screen !== 'preseason' || !currentJob) return
+        if ((preseasonFriendlyResults || []).length >= 3) return
+        const myClub = clubs.find(c => c.id === currentJob.clubId)
+        const opponent = get()._resolveFriendlyOpponent(opponentId)
+        if (!myClub || !opponent) return
+
+        const { homeGoals, awayGoals } = simulateMatch(myClub, opponent)
+        const moraleDelta = homeGoals > awayGoals ? 4 : homeGoals === awayGoals ? 1 : -5
+        const result = { id: Date.now(), opponentId, opponentName: opponent.name, homeGoals, awayGoals }
+        set({
+          clubs: get().clubs.map(c => c.id === myClub.id ? { ...c, morale: clamp(c.morale + moraleDelta, 20, 100) } : c),
+          preseasonFriendlyResults: [...(preseasonFriendlyResults || []), result],
+        })
+      },
+
+      startPreseasonFriendlyLive(opponentId) {
+        const { screen, currentJob, clubs, preseasonFriendlyResults } = get()
+        if (screen !== 'preseason' || !currentJob) return
+        if ((preseasonFriendlyResults || []).length >= 3) return
+        const myClub = clubs.find(c => c.id === currentJob.clubId)
+        const opponent = get()._resolveFriendlyOpponent(opponentId)
+        if (!myClub || !opponent) return
+
+        const base = createLiveMatch(myClub, opponent, true)
+        set({ liveMatch: { ...base, homeClubId: myClub.id, awayClubId: opponent.id, kind: 'friendly' } })
+      },
+
+      commitPreseasonFriendly() {
+        const { liveMatch, currentJob, preseasonFriendlyResults } = get()
+        if (!liveMatch || !liveMatch.finished || !currentJob || liveMatch.kind !== 'friendly') return
+        const { homeGoals, awayGoals, awayClubId } = liveMatch
+        const opponent = get()._resolveFriendlyOpponent(awayClubId)
+        const moraleDelta = homeGoals > awayGoals ? 4 : homeGoals === awayGoals ? 1 : -5
+        const result = { id: Date.now(), opponentId: awayClubId, opponentName: opponent?.name || '', homeGoals, awayGoals }
+        set({
+          liveMatch: null,
+          clubs: get().clubs.map(c => c.id === currentJob.clubId ? { ...c, morale: clamp(c.morale + moraleDelta, 20, 100) } : c),
+          preseasonFriendlyResults: [...(preseasonFriendlyResults || []), result],
+        })
+      },
+
       initWorld() {
         if (get().worldInitialized) return
         set({ worldLeagues: buildWorldLeagueState(), worldInitialized: true, detailedCountryId: 'argentina' })
+      },
+
+      // ── Planteles de clubes del mundo (bajo demanda) ─────────────────────────
+      // No genera nada de más: si ya está en caché, no-op. El seed combina
+      // worldSeed (fijo por partida) + hash del clubId, así el plantel de cada
+      // club es estable dentro de esta partida pero distinto entre partidas.
+      ensureWorldClubSquad(clubId) {
+        const { worldClubSquads, worldSeed } = get()
+        if (worldClubSquads[clubId]) return
+        const worldClub = WORLD_CLUBS.find(c => c.id === clubId)
+        if (!worldClub) return
+        const rand = rng(worldSeed + hashClubId(clubId))
+        const squad = generateSquad(clubId, worldClub.prestige, rand, worldClub.countryId)
+        set({ worldClubSquads: { ...worldClubSquads, [clubId]: squad } })
+      },
+
+      // Igual que ensureWorldClubSquad pero para TODOS los clubes de una liga
+      // en un solo set() — evita el O(n²) de armar el spread de worldClubSquads
+      // club por club (usado por los filtros de Fichar y por el selector de
+      // goleadores al elegir una liga del mundo). Determinístico e idéntico
+      // en resultado a llamar ensureWorldClubSquad club por club.
+      ensureWorldLeagueSquads(leagueId) {
+        const { worldClubSquads, worldSeed } = get()
+        const lgClubs = WORLD_CLUBS.filter(c => c.leagueId === leagueId)
+        const missing = lgClubs.filter(c => !worldClubSquads[c.id])
+        if (!missing.length) return
+        const additions = {}
+        missing.forEach(c => {
+          const rand = rng(worldSeed + hashClubId(c.id))
+          additions[c.id] = generateSquad(c.id, c.prestige, rand, c.countryId)
+        })
+        set({ worldClubSquads: { ...worldClubSquads, ...additions } })
       },
 
       buyPlayer(playerId) {
@@ -462,9 +1427,10 @@ const useGame = create(
         if (!player) return
         if (club.budget < player.value || club.budget < 0) return
 
+        const signedPlayer = { ...player, clubId: club.id, contract: assignInitialContract(player) }
         const updatedClubs = clubs.map(c =>
           c.id === currentJob.clubId
-            ? { ...c, budget: c.budget - player.value, squad: [...c.squad, { ...player, clubId: c.id }] }
+            ? { ...c, budget: c.budget - player.value, squad: [...c.squad, signedPlayer] }
             : c
         )
         const updatedFree = freeAgents.filter(p => p.id !== playerId)
@@ -498,7 +1464,7 @@ const useGame = create(
       // ── Transfer market actions ──────────────────────────────────────────────
 
       makeTransferOffer(targetClubId, playerId, amount) {
-        const { clubs, freeAgents, currentJob, leagues, foreignLeague, season, transferOffers } = get()
+        const { clubs, freeAgents, currentJob, leagues, foreignLeague, season, transferOffers, worldClubSquads } = get()
         if (!currentJob) return
         const myClub = clubs.find(c => c.id === currentJob.clubId)
         if (!myClub) return
@@ -513,7 +1479,7 @@ const useGame = create(
           set({ events: [{ id: Date.now(), text: 'Presupuesto insuficiente', type: 'warn' }] }); return
         }
 
-        const sellerClub = clubs.find(c => c.id === targetClubId)
+        const { club: sellerClub, isWorld } = resolveMarketSeller(targetClubId, clubs, worldClubSquads)
         if (!sellerClub) return
         const player = sellerClub.squad.find(p => p.id === playerId)
         if (!player) return
@@ -521,8 +1487,12 @@ const useGame = create(
         const { decision, counterAmount, reason } = computeAIResponse(player, sellerClub, myClub, amount)
 
         if (decision === 'accepted') {
+          const result = isWorld
+            ? doTransferFromWorld(clubs, worldClubSquads, currentJob.clubId, targetClubId, player, amount)
+            : { clubs: doTransfer(clubs, currentJob.clubId, targetClubId, player, amount), worldClubSquads }
           set({
-            clubs: doTransfer(clubs, currentJob.clubId, targetClubId, player, amount),
+            clubs: result.clubs,
+            worldClubSquads: result.worldClubSquads,
             events: [{ id: Date.now(), text: `¡Fichaje cerrado! ${player.name} llega por $${Math.round(amount / 1000)}k`, type: 'success' }],
           })
         } else if (decision === 'rejected') {
@@ -557,7 +1527,7 @@ const useGame = create(
       },
 
       respondToOutgoingOffer(offerId, decision, newAmount) {
-        const { transferOffers, clubs, currentJob, season } = get()
+        const { transferOffers, clubs, currentJob, season, worldClubSquads } = get()
         const offer = transferOffers.find(o => o.id === offerId)
         if (!offer || offer.type !== 'outgoing') return
         const remove = () => set({ transferOffers: transferOffers.filter(o => o.id !== offerId) })
@@ -567,11 +1537,15 @@ const useGame = create(
           if (!myClub || myClub.budget < offer.counterAmount) {
             set({ events: [{ id: Date.now(), text: 'Presupuesto insuficiente para aceptar', type: 'warn' }] }); return
           }
-          const sellerClub = clubs.find(c => c.id === offer.toClubId)
+          const { club: sellerClub, isWorld } = resolveMarketSeller(offer.toClubId, clubs, worldClubSquads)
           const player = sellerClub?.squad.find(p => p.id === offer.playerId)
           if (!player) { remove(); return }
+          const result = isWorld
+            ? doTransferFromWorld(clubs, worldClubSquads, currentJob.clubId, offer.toClubId, player, offer.counterAmount)
+            : { clubs: doTransfer(clubs, currentJob.clubId, offer.toClubId, player, offer.counterAmount), worldClubSquads }
           set({
-            clubs: doTransfer(clubs, currentJob.clubId, offer.toClubId, player, offer.counterAmount),
+            clubs: result.clubs,
+            worldClubSquads: result.worldClubSquads,
             transferOffers: transferOffers.filter(o => o.id !== offerId),
             events: [{ id: Date.now(), text: `¡Fichaje cerrado! ${offer.playerName} por $${Math.round(offer.counterAmount / 1000)}k`, type: 'success' }],
           })
@@ -586,7 +1560,7 @@ const useGame = create(
           if (!myClub || myClub.budget < newAmount) {
             set({ events: [{ id: Date.now(), text: 'Presupuesto insuficiente', type: 'warn' }] }); return
           }
-          const sellerClub = clubs.find(c => c.id === offer.toClubId)
+          const { club: sellerClub, isWorld } = resolveMarketSeller(offer.toClubId, clubs, worldClubSquads)
           const player = sellerClub?.squad.find(p => p.id === offer.playerId)
           if (!player || !sellerClub) { remove(); return }
 
@@ -598,8 +1572,12 @@ const useGame = create(
             if (myClub.budget < finalAmount) {
               set({ events: [{ id: Date.now(), text: 'Presupuesto insuficiente', type: 'warn' }] }); return
             }
+            const result = isWorld
+              ? doTransferFromWorld(clubs, worldClubSquads, currentJob.clubId, offer.toClubId, player, finalAmount)
+              : { clubs: doTransfer(clubs, currentJob.clubId, offer.toClubId, player, finalAmount), worldClubSquads }
             set({
-              clubs: doTransfer(clubs, currentJob.clubId, offer.toClubId, player, finalAmount),
+              clubs: result.clubs,
+              worldClubSquads: result.worldClubSquads,
               transferOffers: transferOffers.filter(o => o.id !== offerId),
               events: [{ id: Date.now(), text: `¡Fichaje cerrado! ${offer.playerName} por $${Math.round(finalAmount / 1000)}k`, type: 'success' }],
             })
@@ -674,20 +1652,88 @@ const useGame = create(
         set({ transferOffers: get().transferOffers.filter(o => o.id !== offerId) })
       },
 
+      // ── Vender al exterior — oferta simple (sin rondas de negociación) ───────
+      // Reutiliza la MISMA heurística de aceptación que respondToIncomingOffer
+      // usa para decidir si el comprador acepta tu contraoferta (ratio precio/
+      // valor). Los clubes del mundo no tienen presupuesto simulado, así que
+      // no se chequea si "pueden pagar" — siempre pueden, como cualquier rival
+      // de mundo hoy (solo tienen .strength, no finanzas propias).
+      offerPlayerToWorldClub(playerId, targetClubId, amount) {
+        const { clubs, currentJob, leagues, foreignLeague, worldClubSquads } = get()
+        if (!currentJob) return
+        const myClub = clubs.find(c => c.id === currentJob.clubId)
+        if (!myClub) return
+        if (myClub.squad.length <= 14) {
+          set({ events: [{ id: Date.now(), text: 'No podés vender — plantel mínimo 14', type: 'warn' }] }); return
+        }
+        const activeLg = foreignLeague || leagues[myClub.leagueId]
+        if (!activeLg) return
+        const win = getTransferWindow(activeLg.currentMatchday, activeLg.totalMatchdays)
+        if (!win.open) {
+          set({ events: [{ id: Date.now(), text: 'El mercado está cerrado', type: 'warn' }] }); return
+        }
+        const player = myClub.squad.find(p => p.id === playerId)
+        if (!player) return
+        const worldClub = WORLD_CLUBS.find(c => c.id === targetClubId)
+        if (!worldClub) return
+
+        const value = calcTransferValue(player)
+        const ratio = amount / value
+        const aiAccepts = ratio <= 1.10 ? Math.random() < 0.70
+          : ratio <= 1.25 ? Math.random() < 0.30
+          : Math.random() < 0.08
+
+        if (!aiAccepts) {
+          set({ events: [{ id: Date.now(), text: `${worldClub.name} rechazó tu oferta por ${player.name}`, type: 'warn' }] })
+          return
+        }
+
+        const updatedClubs = clubs.map(c =>
+          c.id === currentJob.clubId
+            ? {
+                ...c,
+                budget: c.budget + amount,
+                squad: c.squad.filter(p => p.id !== playerId),
+                starters: (c.starters || []).filter(id => id !== playerId),
+              }
+            : c
+        )
+        // Si el plantel del club comprador ya está cacheado (lo miraste o le
+        // compraste algo), sumamos el jugador ahí para que quede consistente
+        // si volvés a mirarlo. Si nunca se generó, no lo forzamos.
+        const existingWorldSquad = worldClubSquads[targetClubId]
+        const updatedWorldClubSquads = existingWorldSquad
+          ? { ...worldClubSquads, [targetClubId]: [...existingWorldSquad, { ...player, clubId: targetClubId }] }
+          : worldClubSquads
+
+        set({
+          clubs: updatedClubs,
+          worldClubSquads: updatedWorldClubSquads,
+          events: [{ id: Date.now(), text: `¡Venta cerrada! ${player.name} a ${worldClub.name} por $${Math.round(amount / 1000)}k`, type: 'success' }],
+        })
+      },
+
       // ────────────────────────────────────────────────────────────────────────
 
-      simulateMatchday() {
+      // liveResult: optional { homeGoals, awayGoals, cardEvents } for the player's
+      // own fixture, already decided by a live-match session (see commitLiveMatch).
+      // When null (the default — "Simular rápido"), behavior is 100% unchanged.
+      simulateMatchday(liveResult = null) {
         let { clubs, leagues, coach, currentJob, season, foreignLeague } = get()
+        const repBeforeMatchday = coach.reputation
         const { freeAgents, transferWindowRan, transferOffers, aiTransferLog, notifications, coachInterest } = get()
+        const { marketRumors, pendingMarketIntentions } = get()
         const newNotifications = []
         let newCoachInterest = coachInterest
-        let newPlayerDiscontent = null
+        let queuedMarketEvents = [] // pedidos de salida generados por rumores que maduran (mezclados en newLifeEvents más abajo)
 
         // ── Transfer window check (runs AI market + possibly queues an incoming offer) ──
         let updFreeAgents = freeAgents
         let updTransferWindowRan = { ...transferWindowRan }
         let updTransferOffers = [...transferOffers]
         let updAiTransferLog = [...aiTransferLog]
+        let updMarketRumors = [...marketRumors]
+        let updPendingIntentions = [...pendingMarketIntentions]
         let incomingOfferEvent = null
 
         if (currentJob) {
@@ -696,25 +1742,80 @@ const useGame = create(
             const activeLg = foreignLeague || leagues[myClub.leagueId]
             if (activeLg && !activeLg.completed) {
               const win = getTransferWindow(activeLg.currentMatchday, activeLg.totalMatchdays)
+              const curMd = activeLg.currentMatchday
+
+              // ── Rumores del mundo — se anuncian 1 jornada antes de que abra la ventana ──
+              if (!win.open && win.nextOpensAt !== null && curMd === win.nextOpensAt - 1) {
+                const aiClubs = clubs.filter(c => c.id !== currentJob.clubId && c.managerId !== 'player' && (c.squad?.length || 0) > 15)
+                if (aiClubs.length >= 2 && Math.random() < 0.55) {
+                  const buyer = aiClubs[Math.floor(Math.random() * aiClubs.length)]
+                  const seller = aiClubs.filter(c => c.id !== buyer.id)[Math.floor(Math.random() * (aiClubs.length - 1))]
+                  if (seller) {
+                    const bySkill = [...seller.squad].sort((a, b) => b.skill - a.skill)
+                    const lo = Math.min(3, bySkill.length - 1)
+                    const hi = Math.min(9, bySkill.length - 1)
+                    const target = lo <= hi ? bySkill[lo + Math.floor(Math.random() * (hi - lo + 1))] : null
+                    if (target && buyer.budget > calcTransferValue(target) * 0.5) {
+                      updPendingIntentions = [...updPendingIntentions, {
+                        id: `intent-${Date.now()}`, buyerClubId: buyer.id, sellerClubId: seller.id, playerId: target.id, resolveSeason: season,
+                      }]
+                      updMarketRumors = [{
+                        id: `rumor-${Date.now()}-w`, kind: 'world_move',
+                        text: `${buyer.name} prepara una oferta por ${target.name} (${seller.name})`,
+                        playerId: target.id, playerName: target.name, buyerClubId: buyer.id, buyerClubName: buyer.name,
+                        season, matchday: curMd, status: 'pending',
+                      }, ...updMarketRumors].slice(0, 30)
+                    }
+                  }
+                }
+                // "Jugador pidió salir" — puro condimento, sin decisión (no es tu plantel)
+                if (aiClubs.length && Math.random() < 0.35) {
+                  const flavorClub = aiClubs[Math.floor(Math.random() * aiClubs.length)]
+                  const flavorEvt = generateMarketExitEvent(flavorClub)
+                  if (flavorEvt) {
+                    updMarketRumors = [{
+                      id: `rumor-${Date.now()}-x`, kind: 'world_exit',
+                      text: `${flavorEvt.subjectPlayerName} pidió salir de ${flavorClub.name}`,
+                      playerId: flavorEvt.subjectPlayerId, playerName: flavorEvt.subjectPlayerName,
+                      buyerClubId: null, buyerClubName: null,
+                      season, matchday: curMd, status: 'confirmed',
+                    }, ...updMarketRumors].slice(0, 30)
+                  }
+                }
+              }
 
               if (win.open && !updTransferWindowRan[win.type]) {
-                const result = runAITransfers(clubs, freeAgents, currentJob.clubId)
+                const relevantIntentions = updPendingIntentions.filter(i => i.resolveSeason === season)
+                const result = runAITransfers(clubs, freeAgents, currentJob.clubId, relevantIntentions)
                 clubs = result.updatedClubs
                 updFreeAgents = result.updatedFreeAgents
                 updTransferWindowRan[win.type] = true
                 updAiTransferLog = [...result.log.map(text => ({ text, season })), ...updAiTransferLog].slice(0, 20)
+
+                const consumedIds = new Set(result.consumedIntentions.map(c => c.id))
+                updPendingIntentions = updPendingIntentions.filter(i => !consumedIds.has(i.id))
+                updMarketRumors = updMarketRumors.map(r => {
+                  if (r.kind !== 'world_move' || r.status !== 'pending') return r
+                  const match = result.consumedIntentions.find(c => c.playerId === r.playerId && c.buyerClubId === r.buyerClubId)
+                  if (!match) return r
+                  return match.status === 'confirmed'
+                    ? { ...r, status: 'confirmed' }
+                    : { ...r, status: 'faded', text: `El interés de ${r.buyerClubName} en ${r.playerName} se enfrió` }
+                })
+
                 newNotifications.push({
                   id: Date.now() + newNotifications.length + 1,
                   category: 'market',
                   text: win.type === 'verano'
                     ? 'Mercado de verano abierto — podés fichar y vender jugadores'
                     : 'Mercado de invierno abierto — podés fichar y vender jugadores',
-                  read: false, season, matchday: activeLg.currentMatchday,
+                  read: false, season, matchday: curMd,
                 })
               }
 
-              const pendingIn = updTransferOffers.filter(o => o.type === 'incoming' && o.status === 'pending')
-              if (win.open && pendingIn.length === 0 && myClub.squad.length > 14 && Math.random() < 0.15) {
+              // ── Rumor sobre MIS jugadores: aviso previo, después madura en oferta real ──
+              const pendingMine = updMarketRumors.filter(r => r.kind === 'interest_mine' && r.status === 'pending' && r.forClubId === currentJob.clubId)
+              if (win.open && pendingMine.length === 0 && myClub.squad.length > 14 && Math.random() < 0.20) {
                 const potBuyers = clubs.filter(c => c.id !== currentJob.clubId && c.managerId !== 'player' && c.budget > 100000)
                 if (potBuyers.length) {
                   const buyer = potBuyers[Math.floor(Math.random() * potBuyers.length)]
@@ -723,35 +1824,91 @@ const useGame = create(
                   if (top5.length) {
                     const target = top5[Math.floor(Math.random() * top5.length)]
                     const value = calcTransferValue(target)
-                    const amount = Math.round(value * (0.80 + Math.random() * 0.40))
-                    if (buyer.budget >= amount) {
-                      updTransferOffers = [...updTransferOffers, {
-                        id: `in-${Date.now()}`,
-                        type: 'incoming',
-                        fromClubId: buyer.id,
-                        fromClubName: buyer.name,
-                        toClubId: currentJob.clubId,
-                        playerId: target.id,
-                        playerName: target.name,
-                        playerSkill: target.skill,
-                        playerPos: target.position,
-                        amount,
-                        counterAmount: null,
+                    const estAmount = Math.round(value * (0.80 + Math.random() * 0.40))
+                    if (buyer.budget >= estAmount) {
+                      updMarketRumors = [{
+                        id: `rumor-${Date.now()}-m`, kind: 'interest_mine',
+                        text: `${buyer.name} sigue de cerca a ${target.name}`,
+                        playerId: target.id, playerName: target.name, playerPos: target.position,
+                        buyerClubId: buyer.id, buyerClubName: buyer.name, estAmount,
+                        forClubId: currentJob.clubId,
+                        season, matchday: curMd,
+                        resolveAtMatchday: curMd + 2 + Math.floor(Math.random() * 3),
+                        resolveSeason: season,
                         status: 'pending',
-                        round: 1,
-                        season,
-                      }]
-                      incomingOfferEvent = { id: Date.now() + 888, text: `${buyer.name} ofrece $${Math.round(amount / 1000)}k por ${target.name}`, type: 'info' }
+                      }, ...updMarketRumors].slice(0, 30)
                       newNotifications.push({
                         id: Date.now() + newNotifications.length + 800,
                         category: 'transfer',
-                        text: `${buyer.name} ofrece $${Math.round(amount / 1000)}k por ${target.name}`,
-                        read: false, season, matchday: activeLg.currentMatchday,
+                        text: `${buyer.name} sigue de cerca a ${target.name}`,
+                        read: false, season, matchday: curMd,
                       })
                     }
                   }
                 }
               }
+
+              // ── Maduración: el rumor se vuelve oferta real (o se enfría) ──────────
+              updMarketRumors = updMarketRumors.map(r => {
+                if (r.kind !== 'interest_mine' || r.status !== 'pending' || r.forClubId !== currentJob.clubId) return r
+                if (r.resolveSeason !== season || curMd < r.resolveAtMatchday) return r
+
+                const buyer = clubs.find(c => c.id === r.buyerClubId)
+                const freshClub = clubs.find(c => c.id === currentJob.clubId)
+                const target = freshClub?.squad.find(p => p.id === r.playerId)
+                // NO exigir win.open acá — el rumor ya trae su propio plazo
+                // (resolveAtMatchday, 2-4 jornadas después de creado) que a
+                // menudo cae después de que la ventana cierra (solo dura 3
+                // jornadas), así que exigirlo hacía que casi todo rumor se
+                // enfriara sin excepción salvo el creado el primer día de la
+                // ventana. La maduración se resuelve sola, como el deadline day.
+                const matures = buyer && target && buyer.budget >= r.estAmount && Math.random() < 0.65
+
+                if (!matures) {
+                  newNotifications.push({
+                    id: Date.now() + newNotifications.length + 801,
+                    category: 'transfer',
+                    text: `El interés de ${r.buyerClubName} en ${r.playerName} se enfrió`,
+                    read: false, season, matchday: curMd,
+                  })
+                  return { ...r, status: 'faded', text: `El interés de ${r.buyerClubName} en ${r.playerName} se enfrió` }
+                }
+
+                // A veces el propio jugador usa la oferta como palanca para pedir salir
+                const dramaRoll = !target.promise && Math.random() < 0.30
+                if (dramaRoll) {
+                  const exitEvt = buildExitOfferEvent(target, buyer, r.estAmount)
+                  if (exitEvt) queuedMarketEvents.push(exitEvt)
+                } else {
+                  const alreadyPendingIn = updTransferOffers.some(o => o.type === 'incoming' && o.status === 'pending')
+                  if (!alreadyPendingIn) {
+                    updTransferOffers = [...updTransferOffers, {
+                      id: `in-${Date.now()}`,
+                      type: 'incoming',
+                      fromClubId: buyer.id,
+                      fromClubName: buyer.name,
+                      toClubId: currentJob.clubId,
+                      playerId: target.id,
+                      playerName: target.name,
+                      playerSkill: target.skill,
+                      playerPos: target.position,
+                      amount: r.estAmount,
+                      counterAmount: null,
+                      status: 'pending',
+                      round: 1,
+                      season,
+                    }]
+                    incomingOfferEvent = { id: Date.now() + 888, text: `${buyer.name} formalizó una oferta de $${Math.round(r.estAmount / 1000)}k por ${target.name}`, type: 'info' }
+                    newNotifications.push({
+                      id: Date.now() + newNotifications.length + 802,
+                      category: 'transfer',
+                      text: `${buyer.name} ofrece $${Math.round(r.estAmount / 1000)}k por ${target.name}`,
+                      read: false, season, matchday: curMd,
+                    })
+                  }
+                }
+                return { ...r, status: 'confirmed' }
+              })
             }
           }
         }
@@ -780,6 +1937,7 @@ const useGame = create(
         let repDelta = 0
         let confDelta = 0
         let allLeaguesDone = true
+        const pendingGoalEvents = []
 
         for (const leagueId of Object.keys(newLeagues)) {
           const lg = newLeagues[leagueId]
@@ -793,13 +1951,30 @@ const useGame = create(
           }
 
           const fixtures = lg.schedule[nextMd]
+          const leagueName = LEAGUES.find(l => l.id === leagueId)?.name
           const playedFixtures = fixtures.map(fixture => {
             const homeClub = clubsMap[fixture.homeId]
             const awayClub = clubsMap[fixture.awayId]
             if (!homeClub || !awayClub) return fixture
 
-            const { homeGoals, awayGoals } = simulateMatch(homeClub, awayClub)
+            // typeof homeGoals === 'number' (no solo `liveResult` truthy) — evita que
+            // un liveResult mal formado (ej. un evento de React pasado por error a un
+            // onClick) corrompa el resultado del partido con homeGoals/awayGoals undefined.
+            const isLiveFixture = typeof liveResult?.homeGoals === 'number' && typeof liveResult?.awayGoals === 'number' && currentJob &&
+              (fixture.homeId === currentJob.clubId || fixture.awayId === currentJob.clubId)
+            const { homeGoals, awayGoals } = isLiveFixture
+              ? { homeGoals: liveResult.homeGoals, awayGoals: liveResult.awayGoals }
+              : simulateMatch(homeClub, awayClub)
             const result = { ...fixture, homeGoals, awayGoals }
+
+            // ── Goleadores/asistencias (no afecta homeGoals/awayGoals) ──────────
+            const goalAttribution = isLiveFixture
+              ? { homeScorers: scorersFromLiveResult(liveResult, 'home'), awayScorers: scorersFromLiveResult(liveResult, 'away') }
+              : attributeMatchGoals(homeClub, awayClub, homeGoals, awayGoals)
+            const goalCtx = { season, competitionId: leagueId, competitionName: leagueName }
+            goalAttribution.homeScorers.forEach(ev => pendingGoalEvents.push({ ...goalCtx, clubId: fixture.homeId, clubName: homeClub.name, ...ev }))
+            goalAttribution.awayScorers.forEach(ev => pendingGoalEvents.push({ ...goalCtx, clubId: fixture.awayId, clubName: awayClub.name, ...ev }))
+            // ─────────────────────────────────────────────────────────────────
 
             allResults.push({
               leagueId,
@@ -863,12 +2038,34 @@ const useGame = create(
         if (foreignLeague && !foreignLeague.completed && currentJob) {
           const nextMd = foreignLeague.currentMatchday
           if (nextMd < foreignLeague.schedule.length) {
-            const allWorldMap = Object.fromEntries([...clubs, ...WORLD_CLUBS].map(c => [c.id, c]))
+            // WORLD_CLUBS primero: si tu club (con plantel real) comparte id con
+            // un stub de WORLD_CLUBS, tu versión con squad debe ganar la resolución
+            // — así tu plantel real importa en la fuerza de la liga extranjera.
+            const allWorldMap = Object.fromEntries([...WORLD_CLUBS, ...clubs].map(c => [c.id, c]))
+            const flLeagueName = WORLD_LEAGUES.find(l => l.id === foreignLeague.leagueId)?.name
             const playedFixtures = foreignLeague.schedule[nextMd].map(fixture => {
               const hc = allWorldMap[fixture.homeId]
               const ac = allWorldMap[fixture.awayId]
               if (!hc || !ac) return fixture
-              const { homeGoals, awayGoals } = simulateMixedMatch(hc, ac)
+              const isLiveFixture = liveResult && currentJob &&
+                (fixture.homeId === currentJob.clubId || fixture.awayId === currentJob.clubId)
+              const { homeGoals, awayGoals } = isLiveFixture
+                ? { homeGoals: liveResult.homeGoals, awayGoals: liveResult.awayGoals }
+                : simulateMixedMatch(hc, ac)
+
+              // ── Goleadores/asistencias — no-op gratis para los rivales sin plantel ──
+              // clubsMap (armado solo desde `clubs`, sin el shadowing de allWorldMap)
+              // es la fuente correcta para el plantel real de mi propio club acá.
+              const homeSquadClub = clubsMap[fixture.homeId] || hc
+              const awaySquadClub = clubsMap[fixture.awayId] || ac
+              const goalAttribution = isLiveFixture
+                ? { homeScorers: scorersFromLiveResult(liveResult, 'home'), awayScorers: scorersFromLiveResult(liveResult, 'away') }
+                : attributeMatchGoals(homeSquadClub, awaySquadClub, homeGoals, awayGoals)
+              const goalCtx = { season, competitionId: foreignLeague.leagueId, competitionName: flLeagueName }
+              goalAttribution.homeScorers.forEach(ev => pendingGoalEvents.push({ ...goalCtx, clubId: fixture.homeId, clubName: hc.name, ...ev }))
+              goalAttribution.awayScorers.forEach(ev => pendingGoalEvents.push({ ...goalCtx, clubId: fixture.awayId, clubName: ac.name, ...ev }))
+              // ─────────────────────────────────────────────────────────────────
+
               allResults.push({
                 leagueId: foreignLeague.leagueId,
                 homeId: fixture.homeId, awayId: fixture.awayId,
@@ -953,7 +2150,7 @@ const useGame = create(
           }
 
           // Wages deducted every matchday
-          const wageThisMd = playerClub.squad.reduce((s, p) => s + calcPlayerWage(p.skill), 0)
+          const wageThisMd = playerClub.squad.reduce((s, p) => s + (p.contract?.wage ?? calcPlayerWage(p.skill)), 0)
           playerFinanceDelta -= wageThisMd
           playerFinanceUpdate = {
             ...playerFinanceUpdate,
@@ -1012,7 +2209,10 @@ const useGame = create(
         if (playerMatchResult && currentJob && tickedSquad) {
           const playerClubPost = updatedClubs.find(c => c.id === currentJob.clubId)
           const effectiveStarters = getEffectiveStarters(playerClubPost)
-          const { injuries, yellows, reds } = generateMatchEvents(effectiveStarters)
+          const injuryMultExtra = playerClubPost.trainingFocus?.type === 'fisico' ? 0.8 : 1
+          const { injuries, yellows, reds } = liveResult?.cardEvents
+            ? liveResult.cardEvents
+            : generateMatchEvents(effectiveStarters, playerClubPost.tactics, injuryMultExtra)
 
           if (injuries.length || yellows.length || reds.length) {
             updatedClubs = updatedClubs.map(c => {
@@ -1050,10 +2250,15 @@ const useGame = create(
         // ─────────────────────────────────────────────────────────────────────
 
         // ── Bench tracking (update per-player bench counter) ─────────────────
+        // Uses getEffectiveStarters (same source the match simulation itself reads)
+        // instead of the club's raw `starters` field, which setFormation clears to
+        // `[]` until the user re-confirms a lineup — reading it directly used to
+        // freeze every player's benchMatchdays count for as long as `starters` was
+        // empty, even though the match was simulated fine via its own auto-fallback.
         if (currentJob) {
           const pcBench = updatedClubs.find(c => c.id === currentJob.clubId)
-          if (pcBench && pcBench.starters?.length === 11) {
-            const starterSet = new Set(pcBench.starters)
+          if (pcBench && pcBench.squad?.length) {
+            const starterSet = new Set(getEffectiveStarters(pcBench).map(p => p.id))
             updatedClubs = updatedClubs.map(c => {
               if (c.id !== currentJob.clubId) return c
               return {
@@ -1068,6 +2273,21 @@ const useGame = create(
               }
             })
           }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        // ── Low-morale streak (feeds pedido_salida_descontento) ──────────────
+        if (currentJob) {
+          updatedClubs = updatedClubs.map(c => {
+            if (c.id !== currentJob.clubId) return c
+            return {
+              ...c,
+              squad: c.squad.map(p => ({
+                ...p,
+                lowMoraleStreak: (p.morale ?? 70) < 45 ? (p.lowMoraleStreak || 0) + 1 : 0,
+              })),
+            }
+          })
         }
         // ─────────────────────────────────────────────────────────────────────
 
@@ -1125,10 +2345,16 @@ const useGame = create(
         }
 
         // ── Press system ──────────────────────────────────────────────────────
-        const { pressHeadlines, lastConferenceMd } = get()
+        const { pressHeadlines, lastConferenceMd, lifeEvents, lastLifeEventMd } = get()
+        const { worldHistory, lastDtMesMd, celebrations } = get()
         let newPressConference = get().pressConference
         let newLastConferenceMd = lastConferenceMd
+        let newLifeEvents = [...lifeEvents, ...queuedMarketEvents]
+        let newLastLifeEventMd = lastLifeEventMd
         let newPressHeadlines = pressHeadlines
+        let newWorldHistory = { ...worldHistory, records: addScorerEvents(worldHistory.records, pendingGoalEvents) }
+        let newLastDtMesMd = lastDtMesMd
+        let newCelebrations = [...celebrations]
 
         if (playerMatchResult && currentJob) {
           const pressClub = clubsMap[currentJob.clubId]
@@ -1150,6 +2376,28 @@ const useGame = create(
               : 'Racha de 5 empates consecutivos'
             newNotifications.push({ id: Date.now() + newNotifications.length + 200, category: 'milestone', text: milestoneText, read: false, season, matchday: notifMd })
           }
+
+          // ── Historia: récord de racha propia + DT del Mes ───────────────────
+          newWorldHistory = {
+            ...newWorldHistory,
+            records: updateWinStreakRecord(newWorldHistory.records, streak, coach.name, pressClub?.name, season),
+          }
+          const mesAward = checkDtDelMes(streak, pressClub?.name, season, currentMdNum, newLastDtMesMd)
+          if (mesAward) {
+            newWorldHistory = { ...newWorldHistory, awards: [...newWorldHistory.awards, mesAward] }
+            newLastDtMesMd = currentMdNum
+            newNotifications.push({
+              id: Date.now() + newNotifications.length + 210, category: 'award',
+              text: `🏅 DT del Mes: ${mesAward.reason}`, read: false, season, matchday: notifMd,
+            })
+            newCelebrations = [...newCelebrations, makeCelebration({
+              type: 'dt-mes', icon: '📅',
+              title: 'DT del Mes',
+              subtitle: pressClub?.name || '',
+              detail: `${mesAward.reason} · Temporada ${season}`,
+            })]
+          }
+          // ────────────────────────────────────────────────────────────────────
 
           // Media pressure: extra conf/morale delta from streak
           let pressureCf = 0
@@ -1202,23 +2450,42 @@ const useGame = create(
             const repNow = newCoach.reputation
             const goodForm = streak.type === 'win' && streak.count >= 3
             const meetsInt = repNow >= 55 && (goodForm || (repNow >= 70 && streak.type === 'win'))
+            // Una vez que el rumor existe, YA NO hace falta sostener la racha
+            // que lo disparó matchday a matchday — alcanza con no entrar en
+            // una racha de derrotas ni desplomarse en reputación. Antes, un
+            // empate aislado bastaba para borrar el rumor recién creado, lo
+            // que en la práctica exigía una racha de 6+ victorias SIN CORTES
+            // para llegar a ver la oferta formal (3 para disparar el rumor +
+            // 3 más para que madure) — casi nunca pasaba.
+            const interestCollapsed = streak.type === 'loss' && streak.count >= 2
 
-            if (!meetsInt) {
-              // Conditions lost — drop any pending rumor
-              if (newCoachInterest) newCoachInterest = null
-            } else if (!newCoachInterest) {
+            if (newCoachInterest && (repNow < 45 || interestCollapsed)) {
+              newCoachInterest = null
+            } else if (!newCoachInterest && meetsInt) {
               // No rumor yet — chance to generate one
               const myPrestige = myClubForInt?.prestige || 0
-              const argCandidates = clubs.filter(c =>
+              const candidatesAbove = margin => clubs.filter(c =>
                 c.id !== currentJob.clubId &&
                 c.managerId !== 'player' &&
-                c.prestige > myPrestige + 8 &&
+                c.prestige > myPrestige + margin &&
                 canApplyToClub(repNow, c.prestige)
               )
-              const worldCandidates = WORLD_CLUBS.filter(c =>
-                c.prestige > myPrestige + 8 &&
+              const worldCandidatesAbove = margin => WORLD_CLUBS.filter(c =>
+                c.prestige > myPrestige + margin &&
                 canApplyToClub(repNow, c.prestige)
               )
+              let argCandidates = candidatesAbove(8)
+              let worldCandidates = worldCandidatesAbove(8)
+              // El prestigio máximo de cualquier club del juego ronda 95-98, así
+              // que un DT que ya dirige un club de elite (prestigio ~90+) nunca
+              // encuentra un club "+8 más grande" — quedaba sin ofertas para
+              // siempre a partir de ahí (bug). Si no hay ningún candidato más
+              // grande, se relaja a clubes de prestigio similar (laterales entre
+              // grandes, algo real en la carrera de un DT ya consagrado).
+              if (argCandidates.length + worldCandidates.length === 0) {
+                argCandidates = candidatesAbove(-10)
+                worldCandidates = worldCandidatesAbove(-10)
+              }
               const allCandidates = [...argCandidates, ...worldCandidates]
               if (allCandidates.length && Math.random() < 0.18) {
                 const interested = allCandidates[Math.floor(Math.random() * allCandidates.length)]
@@ -1240,7 +2507,7 @@ const useGame = create(
                   matchday: notifMd,
                 })
               }
-            } else {
+            } else if (newCoachInterest) {
               // Existing rumor — escalate if 3+ matchdays have passed in the same season
               const rumorExpired = newCoachInterest.rumorSeason < season
               const matchdaysPassed = rumorExpired ? 99 : notifMd - newCoachInterest.rumorMatchday
@@ -1272,35 +2539,60 @@ const useGame = create(
           }
           // ────────────────────────────────────────────────────────────────────
 
-          // ── Player discontent check ───────────────────────────────────────
-          if (newJob && !newPressConference) {
-            const pcDisc = updatedClubs.find(c => c.id === currentJob.clubId)
-            const discontentPlayer = pcDisc?.squad
-              .filter(p =>
-                p.skill >= 70 &&
-                (p.benchMatchdays || 0) >= 3 &&
-                (p.injuredFor || 0) === 0 &&
-                (p.suspendedFor || 0) === 0
-              )
-              .sort((a, b) => b.skill - a.skill)[0]
+          // ── Promesas vencidas (mercado) — corre siempre, no comparte cooldown ──
+          if (newJob) {
+            const pcPromise = updatedClubs.find(c => c.id === currentJob.clubId)
+            const brokenOrKept = pcPromise ? checkPromiseDeadlines(pcPromise, notifMd, season) : []
+            if (brokenOrKept.length) {
+              updatedClubs = updatedClubs.map(c => {
+                if (c.id !== currentJob.clubId) return c
+                let clubMoraleDelta = 0
+                const squad = c.squad.map(p => {
+                  const res = brokenOrKept.find(r => r.playerId === p.id)
+                  if (!res) return p
+                  const delta = res.fulfilled ? 4 : -18
+                  const resolved = resolveLifeEventEffects({ playerMorale: delta }, { subjectPlayerId: p.id, squad: c.squad })
+                  clubMoraleDelta += resolved.clubMoraleDelta
+                  newNotifications.push({
+                    id: Date.now() + newNotifications.length + 850,
+                    category: 'player',
+                    text: res.fulfilled
+                      ? `Cumpliste lo que le prometiste a ${res.playerName} — lo nota`
+                      : `No cumpliste tu promesa a ${res.playerName} — está furioso`,
+                    read: false, season, matchday: notifMd,
+                  })
+                  return { ...p, morale: clamp((p.morale ?? 70) + delta, 0, 100), promise: null }
+                })
+                return { ...c, squad, morale: clamp(c.morale + clubMoraleDelta, 20, 100) }
+              })
+            }
+          }
+          // ────────────────────────────────────────────────────────────────────
 
-            if (discontentPlayer) {
-              newPlayerDiscontent = {
-                playerId: discontentPlayer.id,
-                playerName: discontentPlayer.name,
-                playerSkill: discontentPlayer.skill,
-                playerPos: discontentPlayer.position,
-                matchdaysOnBench: discontentPlayer.benchMatchdays || 0,
+          // ── Vestuario / mercado events (life-event system — src/data/lifeEvents.js) ──
+          if (newJob && !newPressConference && notifMd - lastLifeEventMd >= 3) {
+            const pcEvt = updatedClubs.find(c => c.id === currentJob.clubId)
+            const playerGoalDiff = playerMatchResult.playerGoals - playerMatchResult.opponentGoals
+            const newEvent = pcEvt ? (generateMarketExitEvent(pcEvt) || generateVestuarioEvent(pcEvt, { playerGoalDiff })) : null
+
+            if (newEvent) {
+              newLifeEvents = [...newLifeEvents, newEvent]
+              newLastLifeEventMd = notifMd
+              // Reset the subject's bench counter so the same trigger doesn't fire again immediately
+              // — except for the two bench-driven vestuario types, which need benchMatchdays to keep
+              // climbing past their own threshold (3) so pedido_salida_protagonismo (6) can escalate
+              // once the complaint keeps getting ignored.
+              const BENCH_ESCALATING_TYPES = new Set(['referente_protagonismo', 'jugador_descontento_banco'])
+              if (newEvent.subjectPlayerId && !BENCH_ESCALATING_TYPES.has(newEvent.type)) {
+                updatedClubs = updatedClubs.map(c =>
+                  c.id !== currentJob.clubId ? c : {
+                    ...c,
+                    squad: c.squad.map(p =>
+                      p.id === newEvent.subjectPlayerId ? { ...p, benchMatchdays: 0 } : p
+                    ),
+                  }
+                )
               }
-              // Reset counter so it doesn't fire again immediately after responding
-              updatedClubs = updatedClubs.map(c =>
-                c.id !== currentJob.clubId ? c : {
-                  ...c,
-                  squad: c.squad.map(p =>
-                    p.id === discontentPlayer.id ? { ...p, benchMatchdays: 0 } : p
-                  ),
-                }
-              )
             }
           }
           // ────────────────────────────────────────────────────────────────────
@@ -1313,11 +2605,19 @@ const useGame = create(
 
         // Simulate world leagues (one matchday each)
         if (!get().worldInitialized) get().initWorld()
+        const { worldClubSquads } = get()
         const newWorldLeagues = { ...get().worldLeagues }
+        // Array aparte de pendingGoalEvents a propósito: pendingGoalEvents ya
+        // se volcó a newWorldHistory.records más arriba (addScorerEvents es un
+        // incremento, no un set — reusar el mismo array acá duplicaría los
+        // goles de liga/copa ya contados). Se vuelca una sola vez, después de
+        // este loop, antes de que las copas sigan encadenando sobre records.
+        const pendingWorldLeagueGoalEvents = []
         for (const leagueId of Object.keys(newWorldLeagues)) {
           const lg = newWorldLeagues[leagueId]
           if (lg.completed) continue
           const clubsById = WORLD_CLUBS_BY_LEAGUE[leagueId] || {}
+          const worldLeagueName = WORLD_LEAGUES.find(l => l.id === leagueId)?.name
           const fixtures = getLightweightFixtures(lg.clubIds, lg.currentMatchday)
           let newStandings = { ...lg.standings }
           fixtures.forEach(({ homeId, awayId }) => {
@@ -1325,6 +2625,24 @@ const useGame = create(
             if (!hc || !ac) return
             const { homeGoals, awayGoals } = simulateLightweightMatch(hc, ac)
             newStandings = applyLightweightFixture(newStandings, homeId, awayId, homeGoals, awayGoals)
+
+            // ── Goleadores/asistencias — best-effort, no-op gratis para el lado
+            // sin plantel cacheado (mismo patrón que copas/liga extranjera:
+            // attributeMatchGoals nunca cambia homeGoals/awayGoals, solo
+            // reparte los que ya decidió simulateLightweightMatch arriba).
+            // La mayoría de los ~2500 clubes del mundo no tienen plantel
+            // generado, así que la mayoría de las fechas no aportan nada acá
+            // — se va completando a medida que el jugador explora el mercado,
+            // juega amistosos, o mira Récords y dispara ensureWorldLeagueSquads.
+            if (worldClubSquads[homeId] || worldClubSquads[awayId]) {
+              const homeSquadClub = worldClubSquads[homeId] ? { ...hc, squad: worldClubSquads[homeId] } : hc
+              const awaySquadClub = worldClubSquads[awayId] ? { ...ac, squad: worldClubSquads[awayId] } : ac
+              const goalAttribution = attributeMatchGoals(homeSquadClub, awaySquadClub, homeGoals, awayGoals)
+              const goalCtx = { season, competitionId: leagueId, competitionName: worldLeagueName }
+              goalAttribution.homeScorers.forEach(ev => pendingWorldLeagueGoalEvents.push({ ...goalCtx, clubId: homeId, clubName: hc.name, ...ev }))
+              goalAttribution.awayScorers.forEach(ev => pendingWorldLeagueGoalEvents.push({ ...goalCtx, clubId: awayId, clubName: ac.name, ...ev }))
+            }
+            // ─────────────────────────────────────────────────────────────────
           })
           const nextMd = lg.currentMatchday + 1
           const isDone = nextMd >= lg.totalMatchdays
@@ -1336,8 +2654,70 @@ const useGame = create(
             champion: isDone ? getLeagueChampion(newStandings) : lg.champion,
           }
         }
+        newWorldHistory = { ...newWorldHistory, records: addScorerEvents(newWorldHistory.records, pendingWorldLeagueGoalEvents) }
+
+        // ── Copas continentales + Mundial de Clubes ─────────────────────────────
+        // pendingCupResult: partido de copa del jugador ya jugado (rápido o en
+        // vivo, ver getPendingCupMatch/startCupLiveMatch/commitCupLiveMatch) —
+        // se consume acá una única vez y se limpia del store al final.
+        const { pendingCupResult } = get()
+        const cupResult = advanceContinentalCups(
+          get().continentalCups, get().worldCup, updatedClubs, newCoach, season, newJob?.clubId || null, newWorldHistory.records, pendingCupResult,
+        )
+        updatedClubs = cupResult.clubs
+        newCoach = cupResult.coach
+        const newContinentalCups = cupResult.continentalCups
+        const newWorldCup = cupResult.worldCup
+        newNotifications.push(...cupResult.notifications)
+        newCelebrations = [...newCelebrations, ...cupResult.celebrations]
+        newWorldHistory = { ...newWorldHistory, records: cupResult.records }
+
+        // Lesiones/tarjetas del partido de copa EN VIVO — partido real aparte
+        // del de liga, con su propia tirada (mismo bloque que usa liveResult
+        // más abajo, pero aplicado independientemente: un jugador puede
+        // lesionarse en los dos partidos de la misma semana).
+        if (pendingCupResult?.cardEvents && newJob) {
+          const { injuries, yellows, reds } = pendingCupResult.cardEvents
+          if (injuries.length || yellows.length || reds.length) {
+            updatedClubs = updatedClubs.map(c => {
+              if (c.id !== newJob.clubId) return c
+              const newSquad = c.squad.map(p => {
+                let np = { ...p }
+                const inj = injuries.find(e => e.playerId === p.id)
+                if (inj) {
+                  np.injuredFor = (np.injuredFor || 0) + inj.matchdays
+                  const cupName = CONTINENTAL_CUP_CONFIG[pendingCupResult.continentId]?.name || 'la copa'
+                  newNotifications.push({ id: Date.now() + newNotifications.length + 160, category: 'player', text: `${p.name} se lesionó jugando la ${cupName} — fuera ${inj.matchdays} jornada${inj.matchdays !== 1 ? 's' : ''}`, read: false, season, matchday: notifMd })
+                }
+                const yellow = yellows.find(e => e.playerId === p.id)
+                if (yellow) {
+                  const newYellows = (np.yellowCards || 0) + 1
+                  np.yellowCards = newYellows
+                  if (newYellows >= 5 && newYellows % 5 === 0) {
+                    np.suspendedFor = (np.suspendedFor || 0) + 1
+                    newNotifications.push({ id: Date.now() + newNotifications.length + 170, category: 'player', text: `${p.name} acumuló 5 amarillas — suspendido 1 jornada`, read: false, season, matchday: notifMd })
+                  }
+                }
+                const red = reds.find(e => e.playerId === p.id)
+                if (red) {
+                  np.suspendedFor = (np.suspendedFor || 0) + red.matchdays
+                  newNotifications.push({ id: Date.now() + newNotifications.length + 180, category: 'player', text: `${p.name} vio la roja — suspendido ${red.matchdays} jornada${red.matchdays !== 1 ? 's' : ''}`, read: false, season, matchday: notifMd })
+                }
+                return np
+              })
+              return { ...c, squad: newSquad }
+            })
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        // ── Subida de tier de reputación (post-partido, post-Copa) ──────────────
+        const repTierCelebration = checkRepTierUp(repBeforeMatchday, newCoach.reputation)
+        if (repTierCelebration) newCelebrations = [...newCelebrations, repTierCelebration]
+        // ─────────────────────────────────────────────────────────────────────
 
         let newEvents = firedEvent ? [firedEvent]
+          : cupResult.toastEvent ? [cupResult.toastEvent]
           : financeEvent ? [financeEvent]
           : matchEventNotifs.length > 0 ? [matchEventNotifs[0]]
           : []
@@ -1348,6 +2728,9 @@ const useGame = create(
           freeAgents: updFreeAgents,
           leagues: newLeagues,
           worldLeagues: newWorldLeagues,
+          continentalCups: newContinentalCups,
+          pendingCupResult: null,
+          worldCup: newWorldCup,
           foreignLeague: newForeignLeague,
           coach: newCoach,
           currentJob: newJob,
@@ -1357,7 +2740,8 @@ const useGame = create(
           events: newEvents,
           notifications: [...notifications, ...newNotifications].slice(-60),
           coachInterest: newCoachInterest,
-          playerDiscontent: newPlayerDiscontent,
+          lifeEvents: newLifeEvents,
+          lastLifeEventMd: newLastLifeEventMd,
           pressHeadlines: newPressHeadlines,
           pressConference: newPressConference,
           lastConferenceMd: newLastConferenceMd,
@@ -1365,11 +2749,17 @@ const useGame = create(
           transferWindowRan: updTransferWindowRan,
           aiTransferLog: updAiTransferLog,
           seasonEndData: allDone ? buildSeasonEndData(updatedClubs, newLeagues, newWorldLeagues, newCoach, newJob, season, newForeignLeague) : null,
+          marketRumors: updMarketRumors,
+          pendingMarketIntentions: updPendingIntentions,
+          worldHistory: newWorldHistory,
+          lastDtMesMd: newLastDtMesMd,
+          celebrations: newCelebrations,
         })
       },
 
       processSeasonEnd() {
-        const { clubs, leagues, coach, currentJob, season, seasonEndData, notifications } = get()
+        const { clubs, leagues, coach, currentJob, season, seasonEndData, notifications, continentalCups, worldCup, worldHistory, celebrations } = get()
+        const repBeforeSeasonEnd = coach.reputation
         const { foreignLeague } = get()
         const postNotifications = []
 
@@ -1380,6 +2770,9 @@ const useGame = create(
         // Promotion / relegation (Argentine clubs only)
         const promotions = {}
         const relegations = {}
+
+        // ── Historia: campeones de las ligas argentinas de esta temporada ────────
+        const seasonTitles = []
 
         LEAGUES.forEach(league => {
           const lg = leagues[league.id]
@@ -1403,7 +2796,92 @@ const useGame = create(
               })
             }
           }
+
+          const championId = standings[0]?.clubId
+          if (championId) {
+            const championClub = clubs.find(c => c.id === championId)
+            const runnerUpClub = clubs.find(c => c.id === standings[1]?.clubId)
+            seasonTitles.push({
+              id: `title-${league.id}-${season}`, season,
+              competitionId: league.id, competitionName: league.name,
+              competitionType: 'league', scope: 'club',
+              countryId: 'argentina', tier: league.tier,
+              winnerId: championId, winnerName: championClub?.name || championId,
+              runnerUpId: runnerUpClub?.id || null, runnerUpName: runnerUpClub?.name || null,
+            })
+          }
         })
+
+        // ── Historia: ascensos/descensos de esta temporada ───────────────────────
+        const seasonMovements = []
+        Object.entries(promotions).forEach(([clubId, toLeagueId]) => {
+          const club = clubs.find(c => c.id === clubId)
+          if (!club) return
+          seasonMovements.push({
+            id: `mv-${clubId}-${season}-up`, season, clubId, clubName: club.name,
+            fromLeagueId: club.leagueId, fromLeagueName: LEAGUES.find(l => l.id === club.leagueId)?.name,
+            toLeagueId, toLeagueName: LEAGUES.find(l => l.id === toLeagueId)?.name,
+            direction: 'up',
+          })
+        })
+        Object.entries(relegations).forEach(([clubId, toLeagueId]) => {
+          const club = clubs.find(c => c.id === clubId)
+          if (!club) return
+          seasonMovements.push({
+            id: `mv-${clubId}-${season}-down`, season, clubId, clubName: club.name,
+            fromLeagueId: club.leagueId, fromLeagueName: LEAGUES.find(l => l.id === club.leagueId)?.name,
+            toLeagueId, toLeagueName: LEAGUES.find(l => l.id === toLeagueId)?.name,
+            direction: 'down',
+          })
+        })
+
+        // ── Historia: copas continentales + Mundial de Clubes (las que ya terminaron esta temporada) ──
+        // Scoped por copa — mismo criterio que advanceSingleCup/advanceWorldCup,
+        // para no dejar que un club argentino homónimo (ej. "pumas-fc") le
+        // tape el nombre a un club del mundo real en otra copa.
+        const cupTitles = []
+        Object.entries(continentalCups).forEach(([continentId, cCup]) => {
+          if (!cCup || cCup.phase !== 'done' || !cCup.champion) return
+          const config = CONTINENTAL_CUP_CONFIG[continentId]
+          const cupClubById = Object.fromEntries(
+            [...WORLD_CLUBS, ...clubs.filter(c => cCup.argentineTeamIds?.includes(c.id))].map(c => [c.id, c]),
+          )
+          const finalRound = cCup.knockout[cCup.knockout.length - 1]
+          const finalTie = finalRound?.ties?.[0]
+          const runnerUpId = finalTie
+            ? (finalTie.homeId === cCup.champion ? finalTie.awayId : finalTie.homeId)
+            : null
+          cupTitles.push({
+            id: `title-${continentId}-${season}`, season,
+            competitionId: `copa-${continentId}`, competitionName: config.name,
+            competitionType: 'continental-cup', scope: 'club',
+            countryId: null, tier: null,
+            winnerId: cCup.champion, winnerName: cupClubById[cCup.champion]?.name || cCup.champion,
+            runnerUpId, runnerUpName: runnerUpId ? (cupClubById[runnerUpId]?.name || runnerUpId) : null,
+          })
+        })
+        let worldCupTitle = null
+        if (worldCup?.phase === 'done' && worldCup.champion) {
+          const wcArgentineChampionIds = worldCup.champions.filter(c => c.isArgentine).map(c => c.clubId)
+          const wcClubById = Object.fromEntries(
+            [...WORLD_CLUBS, ...clubs.filter(c => wcArgentineChampionIds.includes(c.id))].map(c => [c.id, c]),
+          )
+          const wcStandings = Object.values(worldCup.table).sort((a, b) =>
+            b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf
+          )
+          const runnerUpId = wcStandings.find(s => s.clubId !== worldCup.champion)?.clubId || null
+          worldCupTitle = {
+            id: `title-mundial-${season}`, season,
+            competitionId: 'mundial-de-clubes', competitionName: 'Mundial de Clubes',
+            competitionType: 'world-cup', scope: 'club',
+            countryId: null, tier: null,
+            winnerId: worldCup.champion, winnerName: wcClubById[worldCup.champion]?.name || worldCup.champion,
+            runnerUpId, runnerUpName: runnerUpId ? (wcClubById[runnerUpId]?.name || runnerUpId) : null,
+          }
+        }
+
+        let seasonAward = null
+        const seasonCelebrations = []
 
         // Capture player's current league before promotions/relegations are applied
         const playerOriginalLeagueId = currentJob
@@ -1470,6 +2948,42 @@ const useGame = create(
               { season, leagueId, clubId: club.id, clubName: club.name },
             ]
             postNotifications.push({ id: Date.now() + postNotifications.length, category: 'milestone', text: `¡Campeón! Ganaste la liga con ${club?.name} en la Temporada ${season}`, read: false, season, matchday: null })
+            const leagueName = isWorldJob
+              ? WORLD_LEAGUES.find(l => l.id === leagueId)?.name
+              : LEAGUES.find(l => l.id === leagueId)?.name
+            seasonCelebrations.push(makeCelebration({
+              type: 'league-title', icon: '🏆',
+              title: '¡CAMPEÓN!',
+              subtitle: leagueName || '',
+              detail: `${club?.name} · Temporada ${season}`,
+            }))
+          }
+
+          const promoted = !isWorldJob && !!promotions[currentJob.clubId]
+          if (promoted) {
+            seasonCelebrations.push(makeCelebration({
+              type: 'promotion', icon: '⬆️',
+              title: '¡ASCENSO!',
+              subtitle: LEAGUES.find(l => l.id === leagueId)?.name || '',
+              detail: `${club?.name} · Temporada ${season}`,
+            }))
+          }
+
+          seasonAward = checkDtDelAnio(season, club?.name, {
+            won, objectiveMet, promoted,
+            prestige: club?.prestige || 0, pos, totalTeams: standings.length,
+          })
+          if (seasonAward) {
+            postNotifications.push({
+              id: Date.now() + postNotifications.length + 5, category: 'award',
+              text: `🏅 DT del Año: ${seasonAward.reason}`, read: false, season, matchday: null,
+            })
+            seasonCelebrations.push(makeCelebration({
+              type: 'dt-anio', icon: '🏅',
+              title: 'DT del Año',
+              subtitle: club?.name || '',
+              detail: `${seasonAward.reason} · Temporada ${season}`,
+            }))
           }
 
           // Prize money and bonuses
@@ -1597,8 +3111,77 @@ const useGame = create(
           }
         }
 
-        // Age up all players and apply skill evolution for the new season
-        updatedClubs = developPlayers(updatedClubs)
+        // ── Historia: campeones de las ligas del mundo de esta temporada ─────────
+        const worldTitles = []
+        WORLD_LEAGUES.forEach(league => {
+          const lg = completedWorldLeagues[league.id]
+          if (!lg?.champion) return
+          const sorted = Object.values(lg.standings).sort((a, b) =>
+            b.points - a.points || (b.gf - b.ga) - (a.gf - a.ga)
+          )
+          const runnerUpId = sorted[1]?.clubId || null
+          const clubsById = WORLD_CLUBS_BY_LEAGUE[league.id] || {}
+          worldTitles.push({
+            id: `title-${league.id}-${season}`, season,
+            competitionId: league.id, competitionName: league.name,
+            competitionType: 'league', scope: 'club',
+            countryId: league.countryId, tier: league.tier,
+            winnerId: lg.champion, winnerName: clubsById[lg.champion]?.name || lg.champion,
+            runnerUpId, runnerUpName: runnerUpId ? (clubsById[runnerUpId]?.name || runnerUpId) : null,
+          })
+        })
+
+        const newWorldHistory = {
+          titles: [...worldHistory.titles, ...seasonTitles, ...worldTitles, ...cupTitles, ...(worldCupTitle ? [worldCupTitle] : [])],
+          movements: [...worldHistory.movements, ...seasonMovements],
+          awards: [...worldHistory.awards, ...(seasonAward ? [seasonAward] : [])],
+          records: worldHistory.records,
+        }
+
+        // Age up all players and apply skill evolution for the new season.
+        // También cuenta regresiva de contrato: mi club (newJob?.clubId) es
+        // el único que pierde jugadores de verdad al vencer (expired); el
+        // resto se auto-renueva en silencio (ver developPlayers en sim.js).
+        const devResult = developPlayers(updatedClubs, newJob?.clubId ?? null)
+        updatedClubs = devResult.clubs
+
+        let departingContractPlayers = []
+        if (newJob && devResult.expired.length) {
+          const expiredIds = new Set(devResult.expired.map(e => e.playerId))
+          const myClub = updatedClubs.find(c => c.id === newJob.clubId)
+          departingContractPlayers = (myClub?.squad || [])
+            .filter(p => expiredIds.has(p.id))
+            .map(p => ({ ...p, clubId: null, contract: null }))
+          updatedClubs = updatedClubs.map(c =>
+            c.id === newJob.clubId
+              ? {
+                  ...c,
+                  squad: c.squad.filter(p => !expiredIds.has(p.id)),
+                  starters: (c.starters || []).filter(id => !expiredIds.has(id)),
+                }
+              : c
+          )
+          departingContractPlayers.forEach(p => {
+            postNotifications.push({
+              id: Date.now() + postNotifications.length + 95,
+              category: 'player',
+              text: `${p.name} se fue libre — no renovaste su contrato a tiempo`,
+              read: false, season: season + 1, matchday: null,
+            })
+          })
+        }
+        if (newJob && devResult.expiringSoon.length) {
+          const soonIds = new Set(devResult.expiringSoon.map(e => e.playerId))
+          const myClub = updatedClubs.find(c => c.id === newJob.clubId)
+          ;(myClub?.squad || []).filter(p => soonIds.has(p.id)).forEach(p => {
+            postNotifications.push({
+              id: Date.now() + postNotifications.length + 96,
+              category: 'player',
+              text: `${p.name} entra al último año de contrato — renoválo o se va libre`,
+              read: false, season: season + 1, matchday: null,
+            })
+          })
+        }
 
         // Peak / decline notifications (after developPlayers aged everyone up)
         if (newJob) {
@@ -1623,14 +3206,58 @@ const useGame = create(
           })
         }
 
-        // Reset finances ledger, yellow cards and bench counters for the new season
+        // ── Cantera: nueva camada de juveniles (solo el club del jugador) ────
+        if (newJob) {
+          const youthClub = updatedClubs.find(c => c.id === newJob.clubId)
+          if (youthClub) {
+            const rand = rng(Date.now() + hashClubId(youthClub.id) + season)
+            const { players: newYouths, gemsFound, nextCounter } = generateYouthIntake(youthClub, rand)
+            updatedClubs = updatedClubs.map(c =>
+              c.id === newJob.clubId
+                ? { ...c, youthSquad: [...(c.youthSquad || []), ...newYouths], youthCounter: nextCounter }
+                : c
+            )
+            newYouths.forEach(p => {
+              postNotifications.push({
+                id: Date.now() + postNotifications.length + 90,
+                category: 'player',
+                text: `Nuevo juvenil en la cantera: ${p.name} (${p.position}, ${p.age} años) — ${p.scoutLabel}`,
+                read: false, season: season + 1, matchday: null,
+              })
+            })
+            if (gemsFound > 0) {
+              const gem = newYouths.find(p => p.isGem) || newYouths[0]
+              seasonCelebrations.push(makeCelebration({
+                type: 'academy-gem', icon: '💎',
+                title: '¡Joya de la cantera!',
+                subtitle: gem.name,
+                detail: `${gem.position} · ${gem.age} años · ${gem.scoutLabel}`,
+              }))
+            }
+          }
+        }
+
+        // Reset finances ledger and prep the squad for preseason: cura lesiones y
+        // suspensiones (antes quedaban colgadas de la temporada anterior — bug),
+        // resetea contadores, y empuja la moral hacia un punto medio en vez de
+        // arrastrar un extremo injusto de la temporada que terminó.
         if (newJob) {
           updatedClubs = updatedClubs.map(c =>
             c.id === newJob.clubId
               ? {
                   ...c,
                   finances: blankFinances(season + 1),
-                  squad: c.squad.map(p => ({ ...p, yellowCards: 0, benchMatchdays: 0 })),
+                  morale: clamp(Math.round((c.morale + 70) / 2), 50, 90),
+                  trainingFocus: null,
+                  squad: c.squad.map(p => ({
+                    ...p,
+                    yellowCards: 0,
+                    benchMatchdays: 0,
+                    injuredFor: 0,
+                    suspendedFor: 0,
+                    lowMoraleStreak: 0,
+                    morale: clamp(Math.round(((p.morale ?? 70) + 70) / 2), 50, 90),
+                  })),
                 }
               : c
           )
@@ -1639,7 +3266,12 @@ const useGame = create(
         const newSeason = season + 1
         // buildLeagueState only includes Argentine clubs; world club is not in LEAGUES
         const newLeagueState = buildLeagueState(updatedClubs.filter(c => LEAGUES.find(l => l.id === c.leagueId)))
-        const newFreeAgents = generateFreeAgents(Date.now(), 35)
+        const newFreeAgents = [...generateFreeAgents(Date.now(), 35), ...departingContractPlayers]
+
+        // ── Subida de tier de reputación (fin de temporada) ──────────────────────
+        const repTierCelebration = checkRepTierUp(repBeforeSeasonEnd, newCoach.reputation)
+        if (repTierCelebration) seasonCelebrations.push(repTierCelebration)
+        // ─────────────────────────────────────────────────────────────────────
 
         set({
           season: newSeason,
@@ -1647,24 +3279,59 @@ const useGame = create(
           freeAgents: newFreeAgents,
           leagues: newLeagueState,
           worldLeagues: buildWorldLeagueState(),
+          continentalCups: { europa: null, sudamerica: null, norteamerica: null },
+          worldCup: null,
           foreignLeague: newForeignLeague,
           coach: newCoach,
           currentJob: newJob,
-          screen: newScreen,
+          screen: newJob ? 'preseason' : newScreen,
           activeTab: 'home',
           matchReport: null,
+          liveMatch: null,
+          pendingCupResult: null,
           seasonEndData: null,
+          preseasonFriendlyResults: [],
+          preseasonFocusDraft: 'ninguno',
           pressHeadlines: [],
           pressConference: null,
           lastConferenceMd: 0,
           transferOffers: [],
           aiTransferLog: [],
           transferWindowRan: { verano: false, invierno: false },
+          contractNegotiation: null,
+          marketRumors: [],
+          pendingMarketIntentions: [],
+          worldHistory: newWorldHistory,
           events: jobEvents,
           notifications: [...notifications, ...postNotifications].slice(-60),
           coachInterest: null,
-          playerDiscontent: null,
+          lifeEvents: [],
+          lastLifeEventMd: 0,
+          celebrations: [...celebrations, ...seasonCelebrations],
         })
+      },
+
+      // ── Pretemporada ──────────────────────────────────────────────────────
+      // Confirma las decisiones de pretemporada (foco de entrenamiento) y
+      // recién ahí manda al jugador al Dashboard. Los amistosos ya se aplican
+      // en el momento en que se juegan (playPreseasonFriendlyQuick/
+      // commitPreseasonFriendly), no acá.
+      setPreseasonFocusDraft(focus) {
+        set({ preseasonFocusDraft: focus })
+      },
+
+      finishPreseason(trainingFocus) {
+        const { screen, currentJob, clubs, season, preseasonFocusDraft } = get()
+        if (screen !== 'preseason' || !currentJob) return
+        const chosen = trainingFocus ?? preseasonFocusDraft ?? 'ninguno'
+        const focus = chosen && chosen !== 'ninguno' ? chosen : null
+        const updatedClubs = clubs.map(c => {
+          if (c.id !== currentJob.clubId) return c
+          const next = { ...c, trainingFocus: focus ? { type: focus, season } : null }
+          if (focus === 'juveniles') next.youthSquad = applyYouthCamp(c.youthSquad)
+          return next
+        })
+        set({ clubs: updatedClubs, screen: 'dashboard', preseasonFocusDraft: 'ninguno' })
       },
 
       setScreen(screen, tab) {
@@ -1687,44 +3354,107 @@ const useGame = create(
         set({ notifications: get().notifications.filter(n => n.id !== id) })
       },
 
-      respondToPlayerDiscontent(optionIndex) {
-        const OPTS = [
-          { moraleDelta:  5, confidenceDelta: -1 }, // Prometé más minutos
-          { moraleDelta:  2, confidenceDelta:  3 }, // Hablar con honestidad
-          { moraleDelta: -8, confidenceDelta: -3 }, // Ignorar
-        ]
-        const opt = OPTS[optionIndex]
-        if (!opt) return
-        const { currentJob, clubs, playerDiscontent } = get()
-        if (!currentJob || !playerDiscontent) { set({ playerDiscontent: null }); return }
+      // ── Life events (generic — see src/data/lifeEvents.js) ────────────────────
+
+      respondToLifeEvent(optionIndex) {
+        const { lifeEvents, currentJob, clubs, coach, leagues, foreignLeague, season } = get()
+        const event = lifeEvents[0]
+        if (!event) return
+        const remaining = lifeEvents.slice(1)
+        const opt = event.options[optionIndex]
+        if (!opt || !currentJob) { set({ lifeEvents: remaining }); return }
+
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        const squad = club?.squad || []
+        const effects = opt.effects || {}
+
+        // ── "Vender" on a live offer (mercado > pedido_salida_oferta) — closes
+        // the transfer right now instead of applying morale/board deltas.
+        if (effects.sellFor) {
+          const { amount, buyerClubId } = effects.sellFor
+          const player = squad.find(p => p.id === event.subjectPlayerId)
+          if (!player) { set({ lifeEvents: remaining }); return }
+          set({
+            clubs: doTransfer(clubs, buyerClubId, currentJob.clubId, player, amount),
+            lifeEvents: remaining,
+            events: [{ id: Date.now(), text: `¡Fichaje cerrado! ${player.name} sale por $${Math.round(amount / 1000)}k`, type: 'success' }],
+          })
+          return
+        }
+
+        const { playerMoraleDelta, clubMoraleDelta, boardConfidenceDelta, reputationDelta } =
+          resolveLifeEventEffects(effects, { subjectPlayerId: event.subjectPlayerId, squad })
+
+        // ── "Convencer" — track a verifiable deadline, checked every matchday
+        // via checkPromiseDeadlines (src/data/lifeEvents.js).
+        let promise = null
+        if (effects.promise) {
+          const activeLg = foreignLeague || leagues[club?.leagueId]
+          const currentMd = activeLg?.currentMatchday || 0
+          const totalMd = activeLg?.totalMatchdays || 34
+          const deadlineMatchday = effects.promise.type === 'sell_next_window'
+            ? getNextWindowCloseMatchday(currentMd, totalMd)
+            : effects.promise.type === 'more_minutes' ? currentMd + 3 : currentMd + 4
+          promise = { type: effects.promise.type, deadlineMatchday, deadlineSeason: season }
+        }
 
         const updatedClubs = clubs.map(c => {
           if (c.id !== currentJob.clubId) return c
           return {
             ...c,
-            morale: clamp(c.morale + opt.moraleDelta, 20, 100),
-            // keep benchMatchdays already reset to 0 by the check
+            morale: clamp(c.morale + clubMoraleDelta, 20, 100),
+            squad: c.squad.map(p => {
+              if (p.id !== event.subjectPlayerId) return p
+              return {
+                ...p,
+                morale: clamp((p.morale ?? 70) + playerMoraleDelta, 0, 100),
+                ...(promise ? { promise } : {}),
+                ...(effects.transferListed ? { transferListed: true } : {}),
+              }
+            }),
           }
         })
         const newJob = {
           ...currentJob,
-          boardConfidence: clamp(currentJob.boardConfidence + opt.confidenceDelta, 0, 100),
+          boardConfidence: clamp(currentJob.boardConfidence + boardConfidenceDelta, 0, 100),
         }
+        const newCoach = reputationDelta !== 0
+          ? { ...coach, reputation: clamp(coach.reputation + reputationDelta, 0, 100) }
+          : coach
 
         const parts = []
-        if (opt.moraleDelta > 0) parts.push(`Moral +${opt.moraleDelta}`)
-        if (opt.moraleDelta < 0) parts.push(`Moral ${opt.moraleDelta}`)
-        if (opt.confidenceDelta > 0) parts.push(`Confianza +${opt.confidenceDelta}`)
-        if (opt.confidenceDelta < 0) parts.push(`Confianza ${opt.confidenceDelta}`)
+        if (playerMoraleDelta > 0) parts.push(`Ánimo +${playerMoraleDelta}`)
+        if (playerMoraleDelta < 0) parts.push(`Ánimo ${playerMoraleDelta}`)
+        if (clubMoraleDelta > 0) parts.push(`Moral plantel +${clubMoraleDelta}`)
+        if (clubMoraleDelta < 0) parts.push(`Moral plantel ${clubMoraleDelta}`)
+        if (boardConfidenceDelta > 0) parts.push(`Confianza +${boardConfidenceDelta}`)
+        if (boardConfidenceDelta < 0) parts.push(`Confianza ${boardConfidenceDelta}`)
+        if (reputationDelta > 0) parts.push(`Reputación +${reputationDelta}`)
+        if (reputationDelta < 0) parts.push(`Reputación ${reputationDelta}`)
+        if (promise) parts.push('Promesa pendiente')
+        if (effects.transferListed) parts.push('Transferible')
         const evText = parts.join(' · ') || 'Conversación sin efecto inmediato'
-        const evType = opt.moraleDelta >= 5 ? 'success' : opt.moraleDelta < 0 ? 'danger' : 'info'
+        const netDelta = playerMoraleDelta + clubMoraleDelta
+        const evType = netDelta > 0 ? 'success' : netDelta < 0 ? 'danger' : 'info'
 
         set({
           clubs: updatedClubs,
           currentJob: newJob,
-          playerDiscontent: null,
+          coach: newCoach,
+          lifeEvents: remaining,
           events: [{ id: Date.now(), text: evText, type: evType }],
         })
+      },
+
+      startCharla(playerId, charlaType) {
+        const { currentJob, clubs, lifeEvents } = get()
+        if (!currentJob || lifeEvents.length > 0) return
+        const club = clubs.find(c => c.id === currentJob.clubId)
+        const player = club?.squad.find(p => p.id === playerId)
+        if (!player) return
+        const event = getCharlaEvent(charlaType, player)
+        if (!event) return
+        set({ lifeEvents: [...lifeEvents, event] })
       },
 
       respondToCoachOffer(notifId, accept) {
@@ -1779,6 +3509,10 @@ const useGame = create(
         set({ matchReport: null })
       },
 
+      dismissCelebration() {
+        set({ celebrations: get().celebrations.slice(1) })
+      },
+
       resetGame() {
         set({
           hasGame: false,
@@ -1790,20 +3524,35 @@ const useGame = create(
           worldLeagues: {},
           worldInitialized: false,
           detailedCountryId: 'argentina',
+          continentalCups: { europa: null, sudamerica: null, norteamerica: null },
+          worldCup: null,
           currentJob: null,
           foreignLeague: null,
           events: [],
           notifications: [],
           coachInterest: null,
-          playerDiscontent: null,
+          lifeEvents: [],
+          lastLifeEventMd: 0,
           matchReport: null,
+          liveMatch: null,
+          pendingCupResult: null,
           seasonEndData: null,
+          preseasonFriendlyResults: [],
+          preseasonFocusDraft: 'ninguno',
+          celebrations: [],
           pressHeadlines: [],
           pressConference: null,
           lastConferenceMd: 0,
           transferOffers: [],
           aiTransferLog: [],
           transferWindowRan: { verano: false, invierno: false },
+          contractNegotiation: null,
+          marketRumors: [],
+          pendingMarketIntentions: [],
+          worldHistory: { titles: [], movements: [], awards: [], records: {} },
+          lastDtMesMd: 0,
+          worldClubSquads: {},
+          worldSeed: 0,
           season: 1,
         })
       },
@@ -1853,6 +3602,82 @@ const useGame = create(
           if (match) upcoming.push({ ...match, matchday: i + 1 })
         }
         return upcoming
+      },
+
+      // Peeks at whether the NEXT simulateMatchday() call would resolve a
+      // continental-cup OR Mundial-de-Clubes fixture involving the player's
+      // club — without touching any randomness. Used to gate the Dashboard:
+      // show a dedicated cup-match card (rápido/en vivo) instead of silently
+      // letting the cup/Mundial auto-resolve. Returns null once this turn's
+      // fixture is already staged in pendingCupResult (nothing left to peek
+      // at for this turn).
+      getPendingCupMatch() {
+        const { continentalCups, worldCup, currentJob, clubs, pendingCupResult } = get()
+        const playerClubId = currentJob?.clubId
+        if (!playerClubId || pendingCupResult) return null
+
+        for (const continentId of Object.keys(CONTINENTAL_CUP_CONFIG)) {
+          const cup = continentalCups[continentId]
+          if (!cup || cup.phase === 'done') continue
+          if (!cup.teamIds?.includes(playerClubId)) continue
+          if (cup.tickCount % 2 !== 0) continue // this cup won't advance on the next call
+
+          let homeId, awayId
+          let roundSize = null
+          if (cup.phase === 'groups') {
+            const group = cup.groups.find(g => g.clubIds.includes(playerClubId))
+            if (!group) continue
+            const fixture = getGroupMatchdayFixtures(group, cup.groupMd).find(f => f.homeId === playerClubId || f.awayId === playerClubId)
+            if (!fixture) continue
+            homeId = fixture.homeId; awayId = fixture.awayId
+          } else if (cup.phase === 'knockout' && cup.pendingBracket) {
+            const idx = cup.pendingBracket.indexOf(playerClubId)
+            if (idx === -1) continue
+            const pairIdx = idx % 2 === 0 ? idx : idx - 1
+            homeId = cup.pendingBracket[pairIdx]; awayId = cup.pendingBracket[pairIdx + 1]
+            roundSize = cup.pendingBracket.length
+            if (!awayId) continue
+          } else {
+            continue
+          }
+
+          const opponentId = homeId === playerClubId ? awayId : homeId
+          const opponentClub = resolveLiveClub(opponentId, clubs)
+          return {
+            continentId,
+            competitionName: CONTINENTAL_CUP_CONFIG[continentId].name,
+            phase: cup.phase,
+            homeId, awayId, opponentId,
+            isPlayerHome: homeId === playerClubId,
+            opponentName: opponentClub?.name || opponentId,
+            opponentColor: opponentClub?.color || '#888',
+            roundName: roundSize ? (CUP_ROUND_NAME[roundSize] || `Ronda de ${roundSize}`) : null,
+          }
+        }
+
+        // Mundial de Clubes — misma mecánica que las copas continentales de
+        // arriba (mismo gating por tickCount, mismo getPendingCupMatch/
+        // startCupLiveMatch/commitCupLiveMatch), usando 'mundial' como
+        // continentId sentinel para que pendingCupResult sepa a cuál de las
+        // 4 competencias (3 continentales + Mundial) ruteárselo.
+        if (worldCup && worldCup.phase !== 'done' && worldCup.tickCount % 2 === 0) {
+          const fixture = worldCup.fixtures[worldCup.nextFixtureIdx]
+          if (fixture && (fixture.homeId === playerClubId || fixture.awayId === playerClubId)) {
+            const opponentId = fixture.homeId === playerClubId ? fixture.awayId : fixture.homeId
+            const opponentClub = resolveLiveClub(opponentId, clubs)
+            return {
+              continentId: 'mundial',
+              competitionName: 'Mundial de Clubes',
+              phase: 'mundial',
+              homeId: fixture.homeId, awayId: fixture.awayId, opponentId,
+              isPlayerHome: fixture.homeId === playerClubId,
+              opponentName: opponentClub?.name || opponentId,
+              opponentColor: opponentClub?.color || '#888',
+              roundName: null,
+            }
+          }
+        }
+        return null
       },
 
       getRecentResults(clubId, count = 5) {
@@ -1910,7 +3735,7 @@ const useGame = create(
     }),
     {
       name: 'dt-career-save',
-      version: 9,
+      version: 18,
       migrate(state, version) {
         let s = state
         if (version < 2) {
@@ -1975,6 +3800,72 @@ const useGame = create(
         }
         if (version < 9) {
           s = { ...s, playerDiscontent: null }
+        }
+        if (version < 10) {
+          s = { ...s, lifeEvents: [], lastLifeEventMd: 0 }
+        }
+        if (version < 11) {
+          s = { ...s, marketRumors: [], pendingMarketIntentions: [] }
+        }
+        if (version < 12) {
+          s = { ...s, worldHistory: { titles: [], movements: [], awards: [], records: {} }, lastDtMesMd: 0 }
+        }
+        if (version < 13) {
+          s = { ...s, worldClubSquads: {}, worldSeed: Date.now() }
+        }
+        if (version < 14) {
+          // La vieja Copa Internacional única se reemplaza por 3 copas
+          // continentales + Mundial — un torneo en curso no migra limpio a la
+          // nueva forma, así que arranca de cero la próxima vez que se llame
+          // a simulateMatchday (mismo criterio que otros resets de temporada).
+          // El campo `cup` viejo queda huérfano en el save — nada lo lee más.
+          s = { ...s, continentalCups: { europa: null, sudamerica: null, norteamerica: null }, worldCup: null }
+        }
+        if (version < 15) {
+          // Estilo de juego (Mentalidad/Presión/Ritmo/Ataque) — clubes de
+          // saves viejos no tienen `.tactics`; se backfillea con el default
+          // neutro (mismo comportamiento que tenían antes de este cambio).
+          s = { ...s, clubs: s.clubs.map(c => ({ ...c, tactics: c.tactics || { ...DEFAULT_TACTICS } })) }
+        }
+        if (version < 16) {
+          // Cantera — clubes de saves viejos no tienen youthSquad/youthCounter.
+          s = { ...s, clubs: s.clubs.map(c => ({ ...c, youthSquad: c.youthSquad || [], youthCounter: c.youthCounter || 0 })) }
+        }
+        if (version < 17) {
+          // generateFreeAgents reciclaba ids `fa-0`..`fa-N` en cada temporada
+          // (bug, ver gameData.js). Un jugador fichado/liberado en una
+          // temporada vieja podía terminar con el mismo id que un agente
+          // libre nuevo de una temporada posterior, generando ids duplicados
+          // dentro del plantel de un club o de `freeAgents` — eso rompía las
+          // keys de React y hacía que listas filtradas (ej. Mercado) parecieran
+          // no actualizarse. Estos saves ya tienen la corrupción guardada, así
+          // que se limpia acá una sola vez (se queda con la primera aparición).
+          const dedupeById = list => {
+            const seen = new Set()
+            return list.filter(p => {
+              if (seen.has(p.id)) return false
+              seen.add(p.id)
+              return true
+            })
+          }
+          s = {
+            ...s,
+            clubs: (s.clubs || []).map(c => ({ ...c, squad: dedupeById(c.squad || []) })),
+            freeAgents: dedupeById(s.freeAgents || []),
+          }
+        }
+        if (version < 18) {
+          // Sistema de contratos — jugadores de saves viejos no tienen
+          // `.contract`. Se les asigna uno (años restantes al azar, sueldo
+          // igual al que ya se les venía pagando vía calcPlayerWage) para
+          // que la cuenta regresiva arranque sin romper la partida.
+          s = {
+            ...s,
+            clubs: (s.clubs || []).map(c => ({
+              ...c,
+              squad: (c.squad || []).map(p => p.contract ? p : { ...p, contract: assignInitialContract(p) }),
+            })),
+          }
         }
         return s
       },

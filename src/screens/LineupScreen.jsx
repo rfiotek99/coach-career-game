@@ -3,6 +3,7 @@ import useGame from '../store/useGame.js'
 import { FORMATION_SLOTS, FORMATION_VISUALS, POSITION_ROLE } from '../data/gameData.js'
 import { getPositionPenalty } from '../engine/sim.js'
 
+// Field-diagram chip colors — deliberately not brand tokens, see TacticsScreen.jsx.
 const POS_COLORS = {
   POR: '#f59e0b', CAR: '#3b82f6', LD: '#60a5fa', LI: '#60a5fa',
   MCD: '#22c55e', MCC: '#4ade80', MCO: '#86efac', EXT: '#a3e635',
@@ -144,8 +145,8 @@ export default function LineupScreen({ club }) {
     const isBenchMode = selectedBench !== null
 
     let borderColor = POS_COLORS[slotPos] + '55'
-    if (isSelectedSlot) borderColor = '#f0b429'
-    else if (isBenchMode) borderColor = '#60a5fa88'
+    if (isSelectedSlot) borderColor = '#c8ff32'
+    else if (isBenchMode) borderColor = '#ff2ec488'
 
     return (
       <button
@@ -173,15 +174,15 @@ export default function LineupScreen({ club }) {
               </span>
             ) : hasPenalty ? (
               <span className="flex items-center gap-0.5 mt-0.5">
-                <span className="text-pitch-500 line-through text-[9px] leading-none">{player.skill}</span>
+                <span className="text-white/50 line-through text-[9px] leading-none">{player.skill}</span>
                 <span className="text-orange-400 text-[9px] font-bold leading-none">{effectiveSkill}</span>
               </span>
             ) : (
-              <span className="text-emerald-400 text-[9px] font-bold leading-none mt-0.5">{player.skill}</span>
+              <span className="text-[#c8ff32] text-[9px] font-bold leading-none mt-0.5">{player.skill}</span>
             )}
           </>
         ) : (
-          <span className="text-pitch-600 text-[9px] leading-tight text-center">
+          <span className="text-white/40 text-[9px] leading-tight text-center">
             {isBenchMode ? 'asignar' : 'vacío'}
           </span>
         )}
@@ -225,13 +226,13 @@ export default function LineupScreen({ club }) {
 
   return (
     <div className="px-4 py-3 pb-24">
-      <p className="text-pitch-500 text-xs font-semibold uppercase tracking-wider mb-2">
+      <p className="section-label mb-2.5">
         Alineación — {club.formation}
       </p>
 
       {/* Field */}
       <div
-        className="rounded-xl overflow-hidden mb-3"
+        className="rounded-xl overflow-hidden mb-4"
         style={{ background: 'linear-gradient(180deg, #166534 0%, #15803d 50%, #166534 100%)' }}
       >
         <div className="p-2 space-y-1">
@@ -240,20 +241,20 @@ export default function LineupScreen({ club }) {
       </div>
 
       {/* Action buttons */}
-      <div className="flex gap-2 mb-4">
+      <div className="flex gap-2.5 mb-5">
         <button
           onClick={handleAutoComplete}
-          className="flex-1 rounded-xl py-2.5 text-sm font-semibold bg-pitch-800 border border-pitch-700 text-pitch-400 active:border-pitch-600"
+          className="flex-1 rounded-lg py-2.5 font-data text-sm font-semibold bg-carbon-raised border border-line text-ink-dim active:border-ink-faint"
         >
           Auto-completar
         </button>
         <button
           onClick={handleConfirm}
           disabled={!isComplete || !isDirty}
-          className={`flex-1 rounded-xl py-2.5 text-sm font-semibold transition-all ${
+          className={`flex-1 rounded-lg py-2.5 font-data text-sm font-semibold transition-all border ${
             isComplete && isDirty
-              ? 'bg-gold-400/20 border border-gold-400/50 text-gold-400'
-              : 'bg-pitch-800 border border-pitch-800 text-pitch-600'
+              ? 'bg-volt-dim border-volt text-volt'
+              : 'bg-carbon-raised border-line text-ink-faint'
           }`}
         >
           {!isComplete
@@ -265,30 +266,30 @@ export default function LineupScreen({ club }) {
       </div>
 
       {/* Bench */}
-      <p className="text-pitch-500 text-xs font-semibold uppercase tracking-wider mb-2">
+      <p className="section-label mb-2.5">
         Banco de suplentes
         {selectedBench && (
-          <span className="text-blue-400 ml-2 normal-case font-normal">
+          <span className="text-magenta ml-2 normal-case font-normal">
             — tocá un puesto en el campo
           </span>
         )}
       </p>
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         {bench.map(player => {
           const isUnavailable = (player.injuredFor || 0) > 0 || (player.suspendedFor || 0) > 0
           return (
             <button
               key={player.id}
               onClick={() => !isUnavailable && handleBenchClick(player.id)}
-              className={`w-full rounded-xl px-3 py-2 text-left transition-all ${
+              className={`w-full rounded-lg px-3.5 py-2.5 text-left transition-all border ${
                 isUnavailable
-                  ? 'bg-pitch-900/60 border border-pitch-800/60 opacity-60 cursor-default'
+                  ? 'bg-carbon border-line opacity-60 cursor-default'
                   : selectedBench === player.id
-                  ? 'bg-blue-500/20 border border-blue-400/50'
-                  : 'bg-pitch-800 border border-pitch-700 active:border-pitch-600'
+                  ? 'bg-magenta-dim border-magenta'
+                  : 'bg-carbon-raised border-line active:border-ink-faint'
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <span
                   className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0"
                   style={{
@@ -298,21 +299,21 @@ export default function LineupScreen({ club }) {
                 >
                   {player.position}
                 </span>
-                <span className="text-white text-sm flex-1 truncate">{player.name}</span>
-                <span className="text-pitch-500 text-xs shrink-0">{player.age}a</span>
+                <span className="text-ink text-sm flex-1 truncate">{player.name}</span>
+                <span className="font-data text-ink-faint text-xs shrink-0">{player.age}a</span>
                 {isUnavailable ? (
                   <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 shrink-0">
                     {(player.injuredFor || 0) > 0 ? `🤕 ${player.injuredFor}J` : 'SUSP'}
                   </span>
                 ) : (
-                  <span className="text-emerald-400 text-sm font-bold shrink-0">{player.skill}</span>
+                  <span className="font-data text-volt text-base font-extrabold shrink-0">{player.skill}</span>
                 )}
               </div>
             </button>
           )
         })}
         {bench.length === 0 && (
-          <p className="text-pitch-600 text-sm text-center py-2">Todos los jugadores son titulares</p>
+          <p className="font-data text-ink-faint text-sm text-center py-2">Todos los jugadores son titulares</p>
         )}
       </div>
 
@@ -322,17 +323,17 @@ export default function LineupScreen({ club }) {
           className="fixed inset-0 z-50 flex flex-col justify-end"
           onClick={() => setSelectedSlot(null)}
         >
-          <div className="absolute inset-0" style={{ background: 'rgba(7,26,14,0.80)' }} />
+          <div className="absolute inset-0" style={{ background: 'rgba(11,12,14,0.82)' }} />
           <div
-            className="relative bg-pitch-900 border-t border-pitch-700 rounded-t-2xl flex flex-col slide-up"
+            className="relative bg-carbon border-t border-line rounded-t-2xl flex flex-col slide-up"
             style={{ maxHeight: '70vh', maxWidth: 480, width: '100%', margin: '0 auto' }}
             onClick={e => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-pitch-800">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-line">
               <div>
-                <p className="text-white font-bold text-sm">Elegir jugador</p>
-                <p className="text-pitch-500 text-xs">
+                <p className="font-title text-ink text-base leading-none">Elegir jugador</p>
+                <p className="font-data text-ink-faint text-xs mt-1">
                   Puesto:{' '}
                   <span className="font-bold" style={{ color: POS_COLORS[slots[selectedSlot]] }}>
                     {slots[selectedSlot]}
@@ -341,14 +342,14 @@ export default function LineupScreen({ club }) {
               </div>
               <button
                 onClick={() => setSelectedSlot(null)}
-                className="text-pitch-500 text-xl leading-none px-2 active:text-white"
+                className="text-ink-faint text-xl leading-none px-2 active:text-ink"
               >
                 ×
               </button>
             </div>
 
             {/* Player list */}
-            <div className="overflow-y-auto flex-1 px-4 py-2 space-y-1.5">
+            <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
               {pickerPlayers.map(player => {
                 const isCurrentInSlot = player.id === localStarters[selectedSlot]
                 const isUnavailable = (player.injuredFor || 0) > 0 || (player.suspendedFor || 0) > 0
@@ -359,15 +360,15 @@ export default function LineupScreen({ club }) {
                   <button
                     key={player.id}
                     onClick={() => !isUnavailable && handlePickPlayer(player.id)}
-                    className={`w-full rounded-xl px-3 py-2.5 text-left transition-all ${
+                    className={`w-full rounded-lg px-3.5 py-3 text-left transition-all border ${
                       isUnavailable
-                        ? 'bg-pitch-900/60 border border-pitch-800/60 opacity-60 cursor-default'
+                        ? 'bg-carbon border-line opacity-60 cursor-default'
                         : isCurrentInSlot
-                        ? 'bg-gold-400/20 border border-gold-400/40'
-                        : 'bg-pitch-800 border border-pitch-700 active:border-pitch-600'
+                        ? 'bg-volt-dim border-volt'
+                        : 'bg-carbon-raised border-line active:border-ink-faint'
                     }`}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2.5">
                       <span
                         className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0"
                         style={{
@@ -377,22 +378,22 @@ export default function LineupScreen({ club }) {
                       >
                         {player.position}
                       </span>
-                      <span className="text-white text-sm flex-1 truncate">{player.name}</span>
-                      <span className="text-pitch-500 text-xs shrink-0">{player.age}a</span>
+                      <span className="text-ink text-sm flex-1 truncate">{player.name}</span>
+                      <span className="font-data text-ink-faint text-xs shrink-0">{player.age}a</span>
                       {isUnavailable ? (
                         <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 shrink-0">
                           {(player.injuredFor || 0) > 0 ? `🤕 ${player.injuredFor}J` : 'SUSP'}
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1 shrink-0">
+                        <span className="font-data flex items-center gap-1.5 shrink-0">
                           {hasPenalty ? (
                             <>
-                              <span className="text-pitch-500 line-through text-xs">{player.skill}</span>
-                              <span className="text-orange-400 text-sm font-bold">{player.effectiveSkill}</span>
-                              <span className="text-red-400 text-[10px]">-{penaltyPct}%</span>
+                              <span className="text-ink-faint line-through text-xs">{player.skill}</span>
+                              <span className="text-orange-400 text-base font-extrabold">{player.effectiveSkill}</span>
+                              <span className="text-magenta text-[10px]">-{penaltyPct}%</span>
                             </>
                           ) : (
-                            <span className="text-emerald-400 text-sm font-bold">{player.skill}</span>
+                            <span className="text-volt text-base font-extrabold">{player.skill}</span>
                           )}
                         </span>
                       )}

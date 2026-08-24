@@ -3,11 +3,12 @@ import useGame from '../store/useGame.js'
 
 const CATEGORY_META = {
   board:     { icon: '🏢', label: 'Dirigencia',  color: '#3b82f6' },
-  transfer:  { icon: '💰', label: 'Mercado',     color: '#f0b429' },
+  transfer:  { icon: '💰', label: 'Mercado',     color: '#c8ff32' },
   player:    { icon: '🩹', label: 'Jugadores',   color: '#f97316' },
-  market:    { icon: '🏪', label: 'Ventana',     color: '#34d399' },
-  milestone: { icon: '🏆', label: 'Hito',        color: '#fcd34d' },
+  market:    { icon: '🏪', label: 'Ventana',     color: '#c8ff32' },
+  milestone: { icon: '🏆', label: 'Hito',        color: '#c8ff32' },
   interest:  { icon: '👀', label: 'Interés',     color: '#a78bfa' },
+  award:     { icon: '🏅', label: 'Premio',      color: '#c8ff32' },
 }
 
 function fmtSalary(n) {
@@ -19,22 +20,22 @@ function ActionButtons({ notif, onRespond, onDismiss }) {
   if (notif.actionType === 'coachOffer') {
     const { clubName, salary, prestige } = notif.actionPayload || {}
     return (
-      <div className="mt-3 space-y-2">
-        <div className="flex items-center gap-2 text-[10px] text-pitch-500 mb-1">
-          <span>Salario: <span className="text-gold-400 font-bold">{fmtSalary(salary)}/jornada</span></span>
+      <div className="mt-3.5 space-y-2.5">
+        <div className="flex items-center gap-2 font-data text-xs text-ink-faint">
+          <span>Salario: <span className="text-volt font-bold">{fmtSalary(salary)}/jornada</span></span>
           <span>·</span>
-          <span>Prestigio: <span className="text-white">{prestige}</span></span>
+          <span>Prestigio: <span className="text-ink font-semibold">{prestige}</span></span>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => onRespond(notif.id, true)}
-            className="flex-1 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-xs font-semibold active:bg-emerald-500/30"
+            className="flex-1 py-2.5 rounded-lg bg-volt-dim border border-volt text-volt font-data text-xs font-semibold active:opacity-80"
           >
             ✓ Aceptar oferta
           </button>
           <button
             onClick={() => onRespond(notif.id, false)}
-            className="flex-1 py-2 rounded-lg bg-pitch-700 border border-pitch-600 text-pitch-400 text-xs font-semibold active:bg-pitch-600"
+            className="flex-1 py-2.5 rounded-lg bg-carbon-high border border-line text-ink-dim font-data text-xs font-semibold active:bg-line"
           >
             ✕ Rechazar
           </button>
@@ -51,40 +52,40 @@ function NotifRow({ notif, onDismiss, onRespondCoachOffer }) {
 
   return (
     <div
-      className={`px-4 py-3 border-b border-pitch-800 ${hasAction ? 'bg-pitch-800/60' : ''}`}
+      className={`px-4 py-3.5 border-b border-line ${hasAction ? 'bg-carbon-raised' : ''}`}
       style={{ opacity: notif.read && !hasAction ? 0.65 : 1 }}
     >
       <div className="flex items-start gap-3">
         <div
-          className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm mt-0.5"
+          className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-base mt-0.5"
           style={{ background: meta.color + '22', border: `1px solid ${meta.color}44` }}
         >
           {meta.icon}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
             <span
-              className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
+              className="font-data text-[10px] font-bold px-1.5 py-0.5 rounded-full"
               style={{ background: meta.color + '22', color: meta.color }}
             >
               {meta.label}
             </span>
             {notif.matchday && (
-              <span className="text-pitch-700 text-[10px]">J{notif.matchday} · T{notif.season}</span>
+              <span className="font-data text-ink-faint text-[10px]">J{notif.matchday} · T{notif.season}</span>
             )}
             {!notif.matchday && (
-              <span className="text-pitch-700 text-[10px]">T{notif.season}</span>
+              <span className="font-data text-ink-faint text-[10px]">T{notif.season}</span>
             )}
             {hasAction && (
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-gold-400/20 text-gold-400 ml-auto">
+              <span className="font-data text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-volt-dim text-volt ml-auto">
                 Requiere decisión
               </span>
             )}
             {!hasAction && !notif.read && (
-              <span className="w-1.5 h-1.5 rounded-full bg-gold-400 shrink-0 ml-auto" />
+              <span className="w-1.5 h-1.5 rounded-full bg-volt shrink-0 ml-auto" />
             )}
           </div>
-          <p className="text-white text-xs leading-relaxed">{notif.text}</p>
+          <p className="text-ink text-sm leading-relaxed">{notif.text}</p>
 
           {hasAction && (
             <ActionButtons
@@ -97,7 +98,7 @@ function NotifRow({ notif, onDismiss, onRespondCoachOffer }) {
         {!hasAction && (
           <button
             onClick={() => onDismiss(notif.id)}
-            className="text-pitch-700 text-sm active:text-pitch-400 shrink-0 mt-0.5"
+            className="text-ink-faint text-sm active:text-ink-dim shrink-0 mt-0.5"
             aria-label="Descartar"
           >
             ✕
@@ -130,21 +131,21 @@ export default function NotificationCenter({ onClose }) {
 
       {/* Panel */}
       <div
-        className="bg-pitch-900 border-t border-pitch-700 rounded-t-2xl slide-up flex flex-col"
+        className="bg-carbon border-t border-line rounded-t-2xl slide-up flex flex-col"
         style={{ maxHeight: '80vh' }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-pitch-800 shrink-0">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-line shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-base">🔔</span>
-            <span className="text-white font-semibold text-sm">Notificaciones</span>
+            <span className="font-title text-ink text-base leading-none">Notificaciones</span>
             {notifications.length > 0 && (
-              <span className="text-pitch-600 text-xs">({notifications.length})</span>
+              <span className="font-data text-ink-faint text-xs">({notifications.length})</span>
             )}
           </div>
           <button
             onClick={onClose}
-            className="text-pitch-500 text-sm active:text-white w-8 h-8 flex items-center justify-center rounded-full bg-pitch-800"
+            className="text-ink-faint text-sm active:text-ink w-8 h-8 flex items-center justify-center rounded-full bg-carbon-raised"
           >
             ✕
           </button>
@@ -155,8 +156,8 @@ export default function NotificationCenter({ onClose }) {
           {sorted.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
               <span className="text-4xl mb-3">🔕</span>
-              <p className="text-pitch-500 text-sm">Sin notificaciones todavía</p>
-              <p className="text-pitch-700 text-xs mt-1">
+              <p className="font-data text-ink-dim text-sm">Sin notificaciones todavía</p>
+              <p className="font-data text-ink-faint text-xs mt-1">
                 Acá vas a ver avisos de lesiones, mercado, dirigencia y más
               </p>
             </div>
@@ -174,10 +175,10 @@ export default function NotificationCenter({ onClose }) {
 
         {/* Clear all (only non-action notifications) */}
         {sorted.some(n => !n.requiresAction) && (
-          <div className="px-4 py-3 border-t border-pitch-800 shrink-0">
+          <div className="px-4 py-3 border-t border-line shrink-0">
             <button
               onClick={() => sorted.filter(n => !n.requiresAction).forEach(n => dismissNotification(n.id))}
-              className="w-full py-2.5 rounded-xl bg-pitch-800 border border-pitch-700 text-pitch-500 text-xs active:text-white"
+              className="w-full py-2.5 rounded-lg bg-carbon-raised border border-line text-ink-faint font-data text-xs active:text-ink"
             >
               Limpiar notificaciones informativas
             </button>

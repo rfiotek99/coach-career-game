@@ -7,28 +7,28 @@ import { calcStandings } from '../engine/sim.js'
 function StandingRow({ standing, pos, club, isPlayer, isPromotion, isRelegation }) {
   const gd = standing.gf - standing.ga
   return (
-    <div className={`flex items-center px-2 py-2 rounded-lg ${
-      isPlayer ? 'bg-gold-400/15 border border-gold-400/30' :
-      isPromotion ? 'bg-emerald-500/10' :
-      isRelegation ? 'bg-red-500/10' : ''
+    <div className={`flex items-center px-3 py-3 rounded-lg border-l-2 ${
+      isPlayer ? 'bg-volt-dim border-volt' :
+      isPromotion ? 'bg-carbon-high border-volt-mid' :
+      isRelegation ? 'bg-carbon-high border-magenta-mid' : 'border-transparent'
     }`}>
-      <span className={`w-6 text-center text-xs font-bold ${
-        isPlayer ? 'text-gold-400' : 'text-pitch-600'
+      <span className={`font-data w-6 text-center text-xs font-bold ${
+        isPlayer ? 'text-volt' : 'text-ink-faint'
       }`}>{pos}</span>
-      <div className="flex items-center gap-1.5 flex-1 min-w-0 mx-1">
-        {club && <div className="w-2 h-2 rounded-sm shrink-0" style={{ background: club.color }} />}
-        <span className={`text-xs truncate ${isPlayer ? 'text-white font-bold' : 'text-pitch-400'}`}>
+      <div className="flex items-center gap-2 flex-1 min-w-0 mx-1.5">
+        {club && <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: club.color }} />}
+        <span className={`text-sm truncate ${isPlayer ? 'text-ink font-bold' : 'text-ink-dim font-medium'}`}>
           {club?.name || standing.clubId}
         </span>
       </div>
-      <span className="text-pitch-600 text-xs w-6 text-center">{standing.played}</span>
-      <span className="text-pitch-600 text-xs w-6 text-center">{standing.won}</span>
-      <span className="text-pitch-600 text-xs w-6 text-center">{standing.drawn}</span>
-      <span className="text-pitch-600 text-xs w-6 text-center">{standing.lost}</span>
-      <span className={`text-xs w-6 text-center ${gd > 0 ? 'text-emerald-400' : gd < 0 ? 'text-red-400' : 'text-pitch-600'}`}>
+      <span className="font-data text-ink-faint text-xs w-6 text-center">{standing.played}</span>
+      <span className="font-data text-ink-faint text-xs w-6 text-center">{standing.won}</span>
+      <span className="font-data text-ink-faint text-xs w-6 text-center">{standing.drawn}</span>
+      <span className="font-data text-ink-faint text-xs w-6 text-center">{standing.lost}</span>
+      <span className={`font-data text-xs w-7 text-center ${gd > 0 ? 'text-volt' : gd < 0 ? 'text-magenta' : 'text-ink-faint'}`}>
         {gd > 0 ? '+' : ''}{gd}
       </span>
-      <span className={`text-xs font-bold w-7 text-right ${isPlayer ? 'text-gold-400' : 'text-white'}`}>
+      <span className={`font-data text-base font-extrabold w-8 text-right ${isPlayer ? 'text-volt' : 'text-ink'}`}>
         {standing.points}
       </span>
     </div>
@@ -88,15 +88,15 @@ export default function StandingsScreen() {
   return (
     <div className="px-4 py-4 pb-24">
       {/* League tabs */}
-      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+      <div className="flex gap-2 mb-5 overflow-x-auto pb-1">
         {displayTabs.map(l => (
           <button
             key={l.id}
             onClick={() => setSelectedLeague(l.id)}
-            className={`shrink-0 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+            className={`shrink-0 px-3.5 py-2.5 rounded-xl font-data text-xs font-semibold transition-colors ${
               selectedLeague === l.id
-                ? 'bg-gold-400 text-pitch-950'
-                : 'bg-pitch-800 text-pitch-500 active:bg-pitch-700'
+                ? 'bg-volt text-carbon'
+                : 'bg-carbon-raised text-ink-faint active:bg-carbon-high'
             }`}
           >
             {l.name.replace('Liga ', 'L.')}
@@ -105,19 +105,19 @@ export default function StandingsScreen() {
       </div>
 
       {/* Header row */}
-      <div className="flex items-center px-2 mb-1">
+      <div className="flex items-center px-3 mb-2.5">
         <span className="w-6" />
-        <span className="flex-1 text-pitch-700 text-[10px] uppercase mx-1">Club</span>
-        <span className="text-pitch-700 text-[10px] w-6 text-center">PJ</span>
-        <span className="text-pitch-700 text-[10px] w-6 text-center">G</span>
-        <span className="text-pitch-700 text-[10px] w-6 text-center">E</span>
-        <span className="text-pitch-700 text-[10px] w-6 text-center">P</span>
-        <span className="text-pitch-700 text-[10px] w-6 text-center">DG</span>
-        <span className="text-pitch-700 text-[10px] w-7 text-right">Pts</span>
+        <span className="flex-1 font-data text-ink-faint text-[10px] font-bold uppercase tracking-wider mx-1.5">Club</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-6 text-center">PJ</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-6 text-center">G</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-6 text-center">E</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-6 text-center">P</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-7 text-center">DG</span>
+        <span className="font-data text-ink-faint text-[10px] font-bold w-8 text-right">Pts</span>
       </div>
 
       {/* Standings */}
-      <div className="space-y-0.5">
+      <div className="space-y-1.5">
         {standings.map((s, i) => {
           const club = clubs.find(c => c.id === s.clubId) || WORLD_CLUBS.find(c => c.id === s.clubId)
           const isPlayer = s.clubId === playerClubId
@@ -140,17 +140,17 @@ export default function StandingsScreen() {
 
       {/* Legend */}
       {leagueInfo && !isFL && (
-        <div className="mt-4 flex gap-4 text-xs">
+        <div className="mt-5 flex gap-5 font-data text-xs">
           {leagueInfo.promoteSlots > 0 && (
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-sm bg-emerald-500/40" />
-              <span className="text-pitch-600">Ascenso</span>
+            <div className="flex items-center gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-sm bg-volt" />
+              <span className="text-ink-faint">Ascenso</span>
             </div>
           )}
           {leagueInfo.relegateSlots > 0 && (
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-sm bg-red-500/40" />
-              <span className="text-pitch-600">Descenso</span>
+            <div className="flex items-center gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-sm bg-magenta" />
+              <span className="text-ink-faint">Descenso</span>
             </div>
           )}
         </div>
@@ -158,7 +158,7 @@ export default function StandingsScreen() {
 
       {/* Matchday info */}
       {lgForInfo && (
-        <p className="text-pitch-700 text-xs text-center mt-4">
+        <p className="font-data text-ink-faint text-xs text-center mt-5">
           Jornada {lgForInfo.currentMatchday} de {lgForInfo.totalMatchdays}
           {lgForInfo.completed && ' · Temporada finalizada'}
         </p>

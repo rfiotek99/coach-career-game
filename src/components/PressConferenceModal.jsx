@@ -11,28 +11,28 @@ export default function PressConferenceModal() {
   if (!conf) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(7,26,14,0.90)' }}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(11,12,14,0.90)' }}>
       <div
-        className="w-full bg-pitch-900 rounded-t-2xl p-5 slide-up"
+        className="w-full bg-carbon border-t border-line rounded-t-2xl p-5 slide-up"
         style={{ maxWidth: 480 }}
       >
         {/* Header */}
-        <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-center gap-2 mb-2">
           <span className="text-base">📰</span>
-          <span className="text-gold-400 text-xs font-bold uppercase tracking-wider">{conf.title}</span>
+          <span className="font-data text-volt text-xs font-bold uppercase tracking-wider">{conf.title}</span>
         </div>
-        <p className="text-pitch-400 text-sm mb-5 leading-relaxed">{conf.context}</p>
+        <p className="font-data text-ink-dim text-sm mb-5 leading-relaxed">{conf.context}</p>
 
         {/* Options */}
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {conf.options.map((opt, i) => (
             <button
               key={i}
               onClick={() => respondPressConference(i)}
-              className="w-full text-left rounded-xl bg-pitch-800 border border-pitch-700
-                         px-4 py-3 active:bg-pitch-700 transition-colors"
+              className="w-full text-left rounded-lg bg-carbon-raised border border-line
+                         px-4 py-3.5 active:bg-carbon-high transition-colors"
             >
-              <p className="text-white text-sm font-medium leading-snug mb-1.5">
+              <p className="text-ink text-sm font-medium leading-snug mb-2">
                 "{opt.text}"
               </p>
               <div className="flex flex-wrap gap-1.5">
@@ -42,10 +42,10 @@ export default function PressConferenceModal() {
                   return (
                     <span
                       key={j}
-                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-md ${
-                        isPos ? 'bg-emerald-500/20 text-emerald-400' :
-                        isNeg ? 'bg-red-500/20 text-red-400' :
-                        'bg-pitch-700 text-pitch-500'
+                      className={`font-data text-[10px] font-bold px-2 py-1 rounded-md ${
+                        isPos ? 'bg-volt-dim text-volt' :
+                        isNeg ? 'bg-magenta-dim text-magenta' :
+                        'bg-carbon-high text-ink-faint'
                       }`}
                     >
                       {h}
@@ -57,7 +57,7 @@ export default function PressConferenceModal() {
           ))}
         </div>
 
-        <p className="text-pitch-700 text-[10px] text-center mt-4">
+        <p className="font-data text-ink-faint text-[10px] text-center mt-5">
           Elegí con cuidado — esta decisión tiene consecuencias reales
         </p>
       </div>

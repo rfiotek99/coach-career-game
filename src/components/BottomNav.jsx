@@ -1,19 +1,25 @@
+import {
+  Home, Users, Sprout, Target, ListOrdered, Repeat2, Wallet, Globe, Trophy, History, ClipboardList,
+} from 'lucide-react'
 import useGame from '../store/useGame.js'
 
 const EMPLOYED_TABS = [
-  { id: 'home',      icon: '🏠', label: 'Inicio'   },
-  { id: 'squad',     icon: '👥', label: 'Plantel'  },
-  { id: 'tactics',   icon: '🎯', label: 'Táctica'  },
-  { id: 'standings', icon: '📊', label: 'Liga'     },
-  { id: 'market',    icon: '🔄', label: 'Mercado'  },
-  { id: 'finance',   icon: '💰', label: 'Finanzas' },
-  { id: 'world',     icon: '🌍', label: 'Mundo'    },
+  { id: 'home',      Icon: Home,         label: 'Inicio'   },
+  { id: 'squad',     Icon: Users,        label: 'Plantel'  },
+  { id: 'academy',   Icon: Sprout,       label: 'Cantera'  },
+  { id: 'tactics',   Icon: Target,       label: 'Táctica'  },
+  { id: 'standings', Icon: ListOrdered,  label: 'Liga'     },
+  { id: 'market',    Icon: Repeat2,      label: 'Mercado'  },
+  { id: 'finance',   Icon: Wallet,       label: 'Finanzas' },
+  { id: 'world',     Icon: Globe,        label: 'Mundo'    },
+  { id: 'cup',       Icon: Trophy,       label: 'Copa'     },
+  { id: 'history',   Icon: History,      label: 'Historia' },
 ]
 
 const UNEMPLOYED_TABS = [
-  { id: 'home',    icon: '📋', label: 'Ofertas'  },
-  { id: 'history', icon: '📜', label: 'Historial'},
-  { id: 'world',   icon: '🌍', label: 'Mundo'    },
+  { id: 'home',    Icon: ClipboardList, label: 'Ofertas'  },
+  { id: 'history', Icon: History,       label: 'Historial'},
+  { id: 'world',   Icon: Globe,         label: 'Mundo'    },
 ]
 
 export default function BottomNav() {
@@ -34,23 +40,25 @@ export default function BottomNav() {
         {tabs.map(tab => {
           const active = activeTab === tab.id
           const showBadge = tab.id === 'market' && pendingOffers > 0
+          const Icon = tab.Icon
           return (
             <button
               key={tab.id}
               onClick={() => setTab(tab.id)}
-              className={`relative flex-1 flex flex-col items-center py-2 transition-colors ${
-                active ? 'text-gold-400' : 'text-pitch-600 active:text-pitch-500'
+              className={`relative flex-1 flex flex-col items-center gap-1 py-2.5 transition-colors ${
+                active ? 'text-volt' : 'text-ink-faint active:text-ink-dim'
               }`}
             >
-              <span className="text-lg leading-none">{tab.icon}</span>
+              <Icon size={20} strokeWidth={active ? 2.25 : 2} />
               {showBadge && (
-                <span className="absolute top-1 right-[18%] min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[8px] font-bold flex items-center justify-center px-0.5">
+                <span className="absolute top-1.5 right-[18%] min-w-[14px] h-[14px] rounded-full bg-magenta text-ink font-data text-[8px] font-bold flex items-center justify-center px-0.5">
                   {pendingOffers}
                 </span>
               )}
-              <span className={`text-[9px] mt-0.5 font-medium ${active ? 'text-gold-400' : 'text-pitch-600'}`}>
+              <span className={`font-data text-[9px] font-semibold ${active ? 'text-volt' : 'text-ink-faint'}`}>
                 {tab.label}
               </span>
+              {active && <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-6 h-[2px] bg-volt" />}
             </button>
           )
         })}

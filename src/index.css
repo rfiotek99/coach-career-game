@@ -2,6 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Broadcast theme tokens ──────────────────────────────────────────────
+   Single source of truth for the visual identity (carbon bg + volt/magenta
+   accents). Consumed both as Tailwind colors (carbon/surface/ink/volt/...,
+   see tailwind.config.js) and directly as var(--color-x) from inline
+   styles (dynamic club colors, chart bars, etc). Update only here. */
+:root {
+  --color-carbon: #0b0c0e;
+  --color-surface: #16181c;
+  --color-surface-2: #1d2025;
+  --color-line: #2a2d33;
+  --color-ink: #f5f6f7;
+  --color-ink-dim: #9096a0;
+  --color-ink-faint: #5c6169;
+  --color-volt: #c8ff32;
+  --color-volt-dim: rgba(200, 255, 50, 0.14);
+  --color-volt-mid: rgba(200, 255, 50, 0.45);
+  --color-magenta: #ff2ec4;
+  --color-magenta-dim: rgba(255, 46, 196, 0.14);
+  --color-magenta-mid: rgba(255, 46, 196, 0.45);
+  --color-warn: #f0b429;
+  --color-warn-dim: rgba(240, 180, 41, 0.14);
+
+  /* NOTE: Tailwind's `/NN` opacity modifier does NOT work on these colors
+     (they're CSS var() references, not raw RGB tuples) — verified via CLI
+     probe. Always use the -dim/-mid tokens below instead of e.g. bg-volt/20. */
+
+  --font-title: 'Archivo Black', Impact, sans-serif;
+  --font-data: 'Barlow', system-ui, sans-serif;
+}
+
 * {
   -webkit-tap-highlight-color: transparent;
   box-sizing: border-box;
@@ -10,8 +40,9 @@
 html, body {
   margin: 0;
   padding: 0;
-  background-color: #0f2d1a;
+  background-color: var(--color-carbon);
   overscroll-behavior: none;
+  font-family: var(--font-data);
 }
 
 #root {
@@ -19,7 +50,7 @@ html, body {
   max-width: 480px;
   margin: 0 auto;
   min-height: 100dvh;
-  background-color: #0f2d1a;
+  background-color: var(--color-carbon);
   position: relative;
 }
 
@@ -45,22 +76,22 @@ input, button {
   width: 100%;
   max-width: 480px;
   z-index: 50;
-  background: #071a0e;
-  border-top: 1px solid #1a472a;
+  background: var(--color-carbon);
+  border-top: 1px solid var(--color-line);
   padding-bottom: env(safe-area-inset-bottom, 8px);
 }
 
 .rep-bar {
   height: 6px;
   border-radius: 3px;
-  background: #1a472a;
+  background: var(--color-surface-2);
   overflow: hidden;
 }
 
 .rep-fill {
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, #f0b429, #fcd34d);
+  background: linear-gradient(90deg, var(--color-volt), #eaffa0);
   transition: width 0.5s ease;
 }
 
@@ -84,4 +115,75 @@ input, button {
 
 .pulse-gold {
   animation: pulse-gold 1.5s ease infinite;
+}
+
+/* ── Broadcast theme components ──────────────────────────────────────────
+   Reusable across every screen — this is the vocabulary the visual
+   identity is built from. */
+
+/* Headline / team-name type: condensed black italic, sports-lower-third feel. */
+.font-title {
+  font-family: var(--font-title);
+  font-style: italic;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+}
+
+/* Data type: clean sans with tabular figures for scores, stats, lists. */
+.font-data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Standard content card. Border color/width come from Tailwind utilities
+   applied alongside this class (e.g. `card-broadcast border border-line`)
+   so state-based color overrides (border-volt, border-magenta...) win
+   without fighting this class's cascade position. Every card in the app
+   uses this class so depth/radius stay identical everywhere. */
+.card-broadcast {
+  background: var(--color-surface);
+  border-radius: 10px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 3px 10px rgba(0, 0, 0, 0.35);
+}
+
+/* Diagonal cut on the bottom-right corner — headers, chips, small tags. */
+.clip-cut-sm {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
+}
+
+/* Diagonal cut on the bottom-right corner — buttons, section headers. */
+.clip-cut {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%);
+}
+
+/* Primary CTA — volt fill, dark ink text. */
+.btn-volt {
+  background: var(--color-volt);
+  color: var(--color-carbon);
+  font-family: var(--font-data);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Secondary CTA — magenta fill, light text. */
+.btn-magenta {
+  background: var(--color-magenta);
+  color: var(--color-ink);
+  font-family: var(--font-data);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Section label — small uppercase caption with a colored tick, à la
+   broadcast lower-third captions. */
+.section-label {
+  font-family: var(--font-data);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--color-ink-dim);
 }

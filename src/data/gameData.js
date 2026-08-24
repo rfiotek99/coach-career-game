@@ -1,5 +1,8 @@
 // ── Static game data ────────────────────────────────────────────────────────
 
+import { randomNameForCountry, randomCountryForFreeAgent } from './names.js'
+import { DEFAULT_TACTICS } from './tactics.js'
+
 export const LEAGUES = [
   { id: 'liga-premier',   name: 'Liga Premier',   tier: 1, teams: 10, promoteSlots: 0, relegateSlots: 2, countryId: 'argentina' },
   { id: 'liga-nacional',  name: 'Liga Nacional',  tier: 2, teams: 12, promoteSlots: 2, relegateSlots: 2, countryId: 'argentina' },
@@ -12,6 +15,15 @@ export const FORMATIONS = {
   '4-2-3-1': { name: '4-2-3-1', gk: 1, def: 4, mid: 5, fwd: 1, atkBonus: 3,  defBonus: -2 },
   '3-5-2':   { name: '3-5-2',   gk: 1, def: 3, mid: 5, fwd: 2, atkBonus: 2,  defBonus: -3 },
   '5-3-2':   { name: '5-3-2',   gk: 1, def: 5, mid: 3, fwd: 2, atkBonus: -5, defBonus: 8  },
+}
+
+// Field-order and display color for each position — shared by SquadScreen,
+// TacticsScreen's player list and the Dashboard's compact plantel table.
+export const POSITION_ORDER = { POR: 0, CAR: 1, LD: 2, LI: 3, MCD: 4, MCC: 5, MCO: 6, EXT: 7, DEL: 8 }
+export const POSITION_COLORS = {
+  POR: '#f59e0b', CAR: '#3b82f6', LD: '#3b82f6', LI: '#3b82f6',
+  MCD: '#22c55e', MCC: '#22c55e', MCO: '#22c55e', EXT: '#22c55e',
+  DEL: '#ef4444',
 }
 
 // Maps each position abbreviation to its tactical role group
@@ -50,26 +62,6 @@ export const FORMATION_VISUALS = {
   '5-3-2':   [['DEL','DEL'],['MCC','MCC','MCC'],['LI','CAR','CAR','CAR','LD'],['POR']],
 }
 
-const FIRST_NAMES = [
-  'Carlos','Diego','Andrés','Pablo','Rodrigo','Nicolás','Lucas','Matías',
-  'Federico','Sebastián','Joaquín','Gonzalo','Emiliano','Marcos','Alejandro',
-  'Gabriel','Tomás','Cristian','Hernán','Roberto','Fabián','Leonardo','Damián',
-  'Ignacio','Fernando','Raúl','Víctor','Miguel','Agustín','Julio','Oscar',
-  'Leandro','Maximiliano','Ezequiel','Claudio','Eduardo','Gustavo','Sergio',
-  'Javier','Adrián','Nicolás','Iván','Walter','Ariel','Néstor','Ramiro',
-  'Franco','Thiago','Bruno','Lautaro','Enzo','Facundo','Nahuel','Martín',
-]
-
-const LAST_NAMES = [
-  'González','Rodríguez','García','López','Martínez','Fernández','Pérez',
-  'Sánchez','Romero','Torres','Ramírez','Flores','Morales','Jiménez','Díaz',
-  'Vargas','Castro','Ramos','Ortiz','Herrera','Medina','Santos','Reyes',
-  'Álvarez','Navarro','Gómez','Molina','Ruiz','Cabrera','Mendoza','Vega',
-  'Suárez','Carrillo','Delgado','Salazar','Bravo','Fuentes','Guerrero',
-  'Lara','Muñoz','Ríos','Silva','Tapia','Zamora','Acosta','Aguirre',
-  'Benítez','Cardozo','Domínguez','Escobar','Figueroa','Hidalgo','Ibáñez',
-]
-
 const POSITIONS_BY_ROLE = {
   gk:  ['POR'],
   def: ['CAR','CAR','LI','LD'],
@@ -87,13 +79,11 @@ export function rng(seed) {
   }
 }
 
-export function randomName(rand) {
-  const fn = FIRST_NAMES[Math.floor(rand() * FIRST_NAMES.length)]
-  const ln = LAST_NAMES[Math.floor(rand() * LAST_NAMES.length)]
-  return `${fn} ${ln}`
+export function randomName(rand, countryId = 'argentina') {
+  return randomNameForCountry(rand, countryId)
 }
 
-export function generateSquad(clubId, prestige, rand) {
+export function generateSquad(clubId, prestige, rand, countryId = 'argentina') {
   const skillMin = Math.max(20, Math.floor(prestige * 0.45))
   const skillMax = Math.min(97, Math.floor(prestige * 0.92))
   const roles = ['gk','gk','def','def','def','def','def','def','mid','mid','mid','mid','mid','mid','fwd','fwd','fwd','fwd','fwd','def']
@@ -110,9 +100,9 @@ export function generateSquad(clubId, prestige, rand) {
                  : 0
     const potential = Math.min(97, skill + potGap)
     const value = Math.floor(skill * skill * 80 * (1 + rand() * 0.4))
-    return {
+    const player = {
       id: `${clubId}-p${i}`,
-      name: randomName(rand),
+      name: randomNameForCountry(rand, countryId),
       position: pos,
       skill,
       age,
@@ -121,6 +111,7 @@ export function generateSquad(clubId, prestige, rand) {
       value,
       morale: 70,
     }
+    return { ...player, contract: assignInitialContract(player, rand) }
   })
 }
 
@@ -173,27 +164,40 @@ export function initClubs(seed) {
   const formations = Object.keys(FORMATIONS)
   return CLUB_TEMPLATES.map(t => ({
     ...t,
-    squad: generateSquad(t.id, t.prestige, rand),
+    squad: generateSquad(t.id, t.prestige, rand, t.countryId),
     formation: formations[Math.floor(rand() * formations.length)],
     morale: 55 + Math.floor(rand() * 35),
     managerId: null,
-    aiCoachName: randomName(rand),
+    aiCoachName: randomNameForCountry(rand, t.countryId),
     starters: [],
+    tactics: { ...DEFAULT_TACTICS },
+    youthSquad: [],
+    youthCounter: 0,
   }))
 }
 
 export function generateFreeAgents(seed, count = 30) {
   const rand = rng(seed + 9999)
-  return Array.from({ length: count }, (_, i) => ({
-    id: `fa-${i}`,
-    name: randomName(rand),
-    position: ALL_POS[Math.floor(rand() * ALL_POS.length)],
-    skill: 25 + Math.floor(rand() * 45),
-    age: 20 + Math.floor(rand() * 16),
-    clubId: null,
-    value: 0,
-    morale: 60,
-  })).map(p => {
+  return Array.from({ length: count }, (_, i) => {
+    const countryId = randomCountryForFreeAgent(rand)
+    return {
+      // El id incluye `seed` (siempre distinto entre partidas y entre
+      // temporadas — ver los call sites en useGame.js) para que nunca
+      // colisione con agentes libres de una tanda anterior. Antes era solo
+      // `fa-${i}`, que se reiniciaba en cada temporada: un jugador fichado
+      // o liberado en la temporada 3 podía terminar con el mismo id que un
+      // agente libre nuevo de la temporada 9, generando keys duplicadas de
+      // React y listas que parecían no actualizarse con los filtros.
+      id: `fa-${seed}-${i}`,
+      name: randomNameForCountry(rand, countryId),
+      position: ALL_POS[Math.floor(rand() * ALL_POS.length)],
+      skill: 25 + Math.floor(rand() * 45),
+      age: 20 + Math.floor(rand() * 16),
+      clubId: null,
+      value: 0,
+      morale: 60,
+    }
+  }).map(p => {
     const potGap = p.age <= 21 ? 20 + Math.floor(rand() * 16)
                  : p.age <= 24 ? 10 + Math.floor(rand() * 11)
                  : p.age <= 28 ? 3  + Math.floor(rand() * 8)
@@ -225,13 +229,25 @@ export function getObjective(club, leagueId, overrideLeague = null) {
   return { text: 'Mantener categoría', target: relZone - 1, type: 'survive' }
 }
 
+// Camino de reconocimiento del DT — cada escalón es un hito de reputación.
+// getRepLabel deriva de esta misma lista para que UI (Header, HistoryScreen)
+// y lógica compartan una única fuente de verdad.
+export const REP_TIERS = [
+  { min: 0,  label: 'Desconocido', color: '#9ca3af', icon: '❓' },
+  { min: 10, label: 'Regional',    color: '#60a5fa', icon: '📍' },
+  { min: 25, label: 'Nacional',    color: '#34d399', icon: '🏟️' },
+  { min: 45, label: 'Reconocido',  color: '#f0b429', icon: '⭐' },
+  { min: 65, label: 'Elite',       color: '#f97316', icon: '🔥' },
+  { min: 82, label: 'Leyenda',     color: '#ec4899', icon: '👑' },
+]
+
 export function getRepLabel(rep) {
-  if (rep < 10)  return { label: 'Desconocido',   color: '#9ca3af' }
-  if (rep < 25)  return { label: 'Regional',      color: '#60a5fa' }
-  if (rep < 45)  return { label: 'Nacional',      color: '#34d399' }
-  if (rep < 65)  return { label: 'Reconocido',    color: '#f0b429' }
-  if (rep < 82)  return { label: 'Elite',         color: '#f97316' }
-  return           { label: 'Leyenda',            color: '#ec4899' }
+  let tier = REP_TIERS[0]
+  for (const t of REP_TIERS) {
+    if (rep >= t.min) tier = t
+    else break
+  }
+  return tier
 }
 
 export function canApplyToClub(coachRep, clubPrestige) {
@@ -340,6 +356,42 @@ export const FINANCE = {
 
 export function calcPlayerWage(skill) {
   return Math.max(50, skill * 12)
+}
+
+// Contrato inicial para un jugador que entra a un plantel (generación de
+// mundo, fichaje, cantera promovida, migración de saves viejos). `rand` es
+// el generador determinístico de turno (rng(seed) o Math.random según el
+// call site) — mantiene consistencia con el resto de gameData.js.
+export function assignInitialContract(player, rand = Math.random) {
+  return { yearsLeft: 1 + Math.floor(rand() * 4), wage: calcPlayerWage(player.skill) }
+}
+
+// Sueldo que pide un jugador al renovar — parte del sueldo de mercado
+// (calcPlayerWage) y lo ajusta por edad (pico de carrera pide más, veteranos
+// piden menos) y moral como proxy de rendimiento/actitud (no hay stats de
+// partido por jugador). Nunca pide bajar de su sueldo actual.
+export function calcAskingWage(player) {
+  const base = calcPlayerWage(player.skill)
+  let mult = 1
+  if (player.age >= 24 && player.age <= 29) mult *= 1.15
+  else if (player.age <= 21 && (player.potential ?? player.skill) - player.skill > 10) mult *= 1.10
+  else if (player.age >= 32) mult *= 0.85
+
+  const morale = player.morale ?? 70
+  if (morale < 50) mult *= 1.10
+  else if (morale >= 80) mult *= 0.95
+
+  const asked = Math.round((base * mult) / 10) * 10
+  const floor = Math.round((player.contract?.wage ?? base) * 0.9)
+  return Math.max(asked, floor)
+}
+
+// Duración que pide un jugador al renovar — cuanto más joven, más años.
+export function calcAskingYears(player) {
+  if (player.age <= 23) return 4
+  if (player.age <= 28) return 3
+  if (player.age <= 31) return 2
+  return 1
 }
 
 export function calcSponsorRevenue(prestige, leagueId) {
