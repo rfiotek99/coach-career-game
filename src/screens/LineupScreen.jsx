@@ -56,8 +56,11 @@ export default function LineupScreen({ club }) {
     return valid.length === 11 ? valid : Array(11).fill(null)
   })
 
-  // selectedSlot: index into slots array when picker is open
-  const [selectedSlot, setSelectedSlot] = useState(null)
+  // armedSlot: index of a filled slot tapped once — resaltado, esperando un
+  // segundo toque (otro slot -> swap, el mismo -> abrir picker, banco -> reemplazar).
+  const [armedSlot, setArmedSlot] = useState(null)
+  // pickerSlot: index into slots array when the full "Elegir jugador" modal is open
+  const [pickerSlot, setPickerSlot] = useState(null)
   // selectedBench: player ID tapped on bench (waiting to be placed in a slot)
   const [selectedBench, setSelectedBench] = useState(null)
 
@@ -90,9 +93,33 @@ export default function LineupScreen({ club }) {
     if (selectedBench) {
       assignBenchToSlot(selectedBench, slotIndex)
       setSelectedBench(null)
-    } else {
-      setSelectedSlot(slotIndex)
+      setArmedSlot(null)
+      return
     }
+    if (armedSlot === null) {
+      // Nada armado todavía: un slot vacío no tiene con quién intercambiar,
+      // así que abre directo el picker de siempre. Un slot con jugador se arma.
+      if (localStarters[slotIndex]) setArmedSlot(slotIndex)
+      else setPickerSlot(slotIndex)
+      return
+    }
+    if (armedSlot === slotIndex) {
+      // Tocar el mismo jugador de nuevo abre el picker completo para ese slot.
+      setPickerSlot(slotIndex)
+      setArmedSlot(null)
+      return
+    }
+    // Tocar otro slot (con jugador o vacío) intercambia las dos posiciones.
+    swapSlots(armedSlot, slotIndex)
+    setArmedSlot(null)
+  }
+
+  function swapSlots(a, b) {
+    setLocalStarters(prev => {
+      const next = [...prev]
+      ;[next[a], next[b]] = [next[b], next[a]]
+      return next
+    })
   }
 
   function assignBenchToSlot(playerId, slotIndex) {
@@ -107,8 +134,13 @@ export default function LineupScreen({ club }) {
   }
 
   function handleBenchClick(playerId) {
+    if (armedSlot !== null) {
+      assignBenchToSlot(playerId, armedSlot)
+      setArmedSlot(null)
+      setSelectedBench(null)
+      return
+    }
     setSelectedBench(prev => (prev === playerId ? null : playerId))
-    setSelectedSlot(null)
   }
 
   function handlePickPlayer(playerId) {
@@ -116,15 +148,16 @@ export default function LineupScreen({ club }) {
       const next = [...prev]
       const existingIdx = next.indexOf(playerId)
       if (existingIdx !== -1) next[existingIdx] = null
-      next[selectedSlot] = playerId
+      next[pickerSlot] = playerId
       return next
     })
-    setSelectedSlot(null)
+    setPickerSlot(null)
   }
 
   function handleAutoComplete() {
     setLocalStarters(autoComplete(club.squad, club.formation))
     setSelectedBench(null)
+    setArmedSlot(null)
   }
 
   function handleConfirm() {
@@ -141,12 +174,14 @@ export default function LineupScreen({ club }) {
     const hasPenalty = penalty < 1.0
     const isSlotUnavailable = player && ((player.injuredFor || 0) > 0 || (player.suspendedFor || 0) > 0)
 
-    const isSelectedSlot = selectedSlot === slotIndex
+    const isSelectedSlot = armedSlot === slotIndex
     const isBenchMode = selectedBench !== null
+    const isSwapMode = armedSlot !== null
 
     let borderColor = POS_COLORS[slotPos] + '55'
     if (isSelectedSlot) borderColor = '#c8ff32'
     else if (isBenchMode) borderColor = '#ff2ec488'
+    else if (isSwapMode) borderColor = '#c8ff3260'
 
     return (
       <button
@@ -183,7 +218,7 @@ export default function LineupScreen({ club }) {
           </>
         ) : (
           <span className="text-white/40 text-[9px] leading-tight text-center">
-            {isBenchMode ? 'asignar' : 'vacío'}
+            {isBenchMode || isSwapMode ? 'asignar' : 'vacío'}
           </span>
         )}
       </button>
@@ -193,11 +228,11 @@ export default function LineupScreen({ club }) {
   // ── Picker modal player list ──────────────────────────────────────────────────
 
   const pickerPlayers = useMemo(() => {
-    if (selectedSlot === null) return []
-    const slotPos = slots[selectedSlot]
+    if (pickerSlot === null) return []
+    const slotPos = slots[pickerSlot]
     const slotRole = POSITION_ROLE[slotPos]
     return club.squad
-      .filter(p => p.id === localStarters[selectedSlot] || !starterSet.has(p.id))
+      .filter(p => p.id === localStarters[pickerSlot] || !starterSet.has(p.id))
       .map(p => ({
         ...p,
         penalty: getPositionPenalty(p.position, slotPos),
@@ -205,7 +240,7 @@ export default function LineupScreen({ club }) {
         sameRole: POSITION_ROLE[p.position] === slotRole,
       }))
       .sort((a, b) => (b.sameRole ? 1 : 0) - (a.sameRole ? 1 : 0) || b.effectiveSkill - a.effectiveSkill)
-  }, [selectedSlot, club.squad, localStarters, starterSet, slots])
+  }, [pickerSlot, club.squad, localStarters, starterSet, slots])
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -228,6 +263,11 @@ export default function LineupScreen({ club }) {
     <div className="px-4 py-3 pb-24">
       <p className="section-label mb-2.5">
         Alineación — {club.formation}
+        {armedSlot !== null && (
+          <span className="text-volt ml-2 normal-case font-normal">
+            — tocá otro puesto para intercambiar
+          </span>
+        )}
       </p>
 
       {/* Field */}
@@ -318,10 +358,10 @@ export default function LineupScreen({ club }) {
       </div>
 
       {/* Player picker modal */}
-      {selectedSlot !== null && (
+      {pickerSlot !== null && (
         <div
           className="fixed inset-0 z-50 flex flex-col justify-end"
-          onClick={() => setSelectedSlot(null)}
+          onClick={() => setPickerSlot(null)}
         >
           <div className="absolute inset-0" style={{ background: 'rgba(11,12,14,0.82)' }} />
           <div
@@ -335,13 +375,13 @@ export default function LineupScreen({ club }) {
                 <p className="font-title text-ink text-base leading-none">Elegir jugador</p>
                 <p className="font-data text-ink-faint text-xs mt-1">
                   Puesto:{' '}
-                  <span className="font-bold" style={{ color: POS_COLORS[slots[selectedSlot]] }}>
-                    {slots[selectedSlot]}
+                  <span className="font-bold" style={{ color: POS_COLORS[slots[pickerSlot]] }}>
+                    {slots[pickerSlot]}
                   </span>
                 </p>
               </div>
               <button
-                onClick={() => setSelectedSlot(null)}
+                onClick={() => setPickerSlot(null)}
                 className="text-ink-faint text-xl leading-none px-2 active:text-ink"
               >
                 ×
@@ -351,7 +391,7 @@ export default function LineupScreen({ club }) {
             {/* Player list */}
             <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
               {pickerPlayers.map(player => {
-                const isCurrentInSlot = player.id === localStarters[selectedSlot]
+                const isCurrentInSlot = player.id === localStarters[pickerSlot]
                 const isUnavailable = (player.injuredFor || 0) > 0 || (player.suspendedFor || 0) > 0
                 const hasPenalty = player.penalty < 1.0
                 const penaltyPct = Math.round((1 - player.penalty) * 100)
