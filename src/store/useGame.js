@@ -85,10 +85,22 @@ function buildLeagueState(clubs) {
   return state
 }
 
-function makeAvailableJobs(clubs, coachRep) {
+// Un club del que renunciaste o te echaron no te vuelve a ofrecer el cargo
+// hasta que pasen JOB_COOLDOWN_SEASONS temporadas — evita el exploit de
+// renunciar justo antes del despido y retomar el mismo club al toque con la
+// confianza reseteada a 60% (acceptJob no distingue "primera vez" de "volviste").
+const JOB_COOLDOWN_SEASONS = 2
+
+function isClubOnCooldown(clubId, jobHistory, season) {
+  const lastExit = [...(jobHistory || [])].reverse().find(h => h.clubId === clubId && (h.fired || h.resigned))
+  return !!lastExit && season - lastExit.season < JOB_COOLDOWN_SEASONS
+}
+
+function makeAvailableJobs(clubs, coachRep, jobHistory, season) {
   return clubs
     .filter(c => c.managerId === null)
     .filter(c => canApplyToClub(coachRep, c.prestige))
+    .filter(c => !isClubOnCooldown(c.id, jobHistory, season))
     .map(c => ({
       clubId: c.id,
       salary: Math.floor(c.prestige * 850 + 5000),
@@ -958,7 +970,13 @@ const useGame = create(
         )
         if (isWorldJob) updatedClubs = updatedClubs.filter(c => c.id !== currentJob.clubId)
 
-        const newRep = clamp(coach.reputation - 4, 0, 100)
+        // Renunciar con la confianza ya por el piso paga lo mismo (o más) que
+        // dejarte despedir (-8 a mitad de temporada, -5 a fin de temporada) —
+        // si no, renunciar preventivamente sería siempre la salida más barata,
+        // el mismo escape que el cooldown de arriba busca cerrar.
+        const confBefore = currentJob.boardConfidence
+        const repPenalty = confBefore < 15 ? 8 : confBefore < 30 ? 6 : 4
+        const newRep = clamp(coach.reputation - repPenalty, 0, 100)
 
         set({
           clubs: updatedClubs,
@@ -3641,8 +3659,8 @@ const useGame = create(
       },
 
       getAvailableJobs() {
-        const { clubs, coach } = get()
-        return makeAvailableJobs(clubs, coach?.reputation || 0)
+        const { clubs, coach, season } = get()
+        return makeAvailableJobs(clubs, coach?.reputation || 0, coach?.jobHistory, season)
       },
 
       getUpcomingMatches(clubId, count = 5) {
@@ -3779,7 +3797,9 @@ const useGame = create(
         const { coach, season } = get()
         const rep = coach?.reputation || 0
         const rand = rng(season * 97 + Math.floor(rep * 13))
-        const eligible = WORLD_CLUBS.filter(c => canApplyToClub(rep, c.prestige))
+        const eligible = WORLD_CLUBS
+          .filter(c => canApplyToClub(rep, c.prestige))
+          .filter(c => !isClubOnCooldown(c.id, coach?.jobHistory, season))
         if (!eligible.length) return []
         const shuffled = [...eligible].sort(() => rand() - 0.5)
         return shuffled.slice(0, 5).map(c => ({
