@@ -724,6 +724,15 @@ const useGame = create(
       activeTab: 'home',
       hasGame: false,
 
+      // Onboarding — no se resetea en startNewGame/resetGame a propósito: es
+      // "de por vida", no por carrera. Ver dismissWelcome/skipTutorial/advanceTutorial.
+      onboarding: {
+        welcomeSeen: false,
+        tutorialActive: false,
+        tutorialStep: 0, // 0=inactivo, 1..4=pasos guiados
+        seenScreenTips: { squad: false, tactics: false, market: false },
+      },
+
       // Coach
       coach: null,
 
@@ -920,6 +929,7 @@ const useGame = create(
             currentJob: { clubId, objective, boardConfidence: 60, salary, contractEndSeason: season + 1 },
             events: [{ id: Date.now(), text: `Contratado como DT de ${club.name}`, type: 'success' }],
           })
+          get().advanceTutorial(1)
           return
         }
 
@@ -957,6 +967,7 @@ const useGame = create(
           currentJob: { clubId, objective, boardConfidence: 60, salary, contractEndSeason: season + 1 },
           events: [{ id: Date.now(), text: `Contratado como DT de ${worldClub.name}`, type: 'success' }],
         })
+        get().advanceTutorial(1)
       },
 
       resignJob() {
@@ -1066,6 +1077,10 @@ const useGame = create(
             c.id === currentJob.clubId ? { ...c, starters } : c
           ),
         })
+        // Cubre las dos secuencias posibles: el jugador pasó por Plantel
+        // primero (paso 2 en curso) o fue directo a Táctica (paso 3).
+        get().advanceTutorial(2)
+        get().advanceTutorial(3)
       },
 
       // Estilo de juego — instrucciones tácticas persistentes (Mentalidad,
@@ -1219,6 +1234,7 @@ const useGame = create(
         const awayClub = isPlayerHome ? opponentClub : club
         const base = createLiveMatch(homeClub, awayClub, isPlayerHome)
         set({ liveMatch: { ...base, homeClubId: homeClub.id, awayClubId: awayClub.id } })
+        get().advanceTutorial(4)
       },
 
       // ── Live match for the player's own continental-cup fixture ──────────────
@@ -1746,6 +1762,7 @@ const useGame = create(
       // own fixture, already decided by a live-match session (see commitLiveMatch).
       // When null (the default — "Simular rápido"), behavior is 100% unchanged.
       simulateMatchday(liveResult = null) {
+        get().advanceTutorial(4)
         let { clubs, leagues, coach, currentJob, season, foreignLeague } = get()
         const repBeforeMatchday = coach.reputation
         const { freeAgents, transferWindowRan, transferOffers, aiTransferLog, notifications, coachInterest } = get()
@@ -3381,6 +3398,53 @@ const useGame = create(
 
       setTab(tab) {
         set({ activeTab: tab })
+        if (tab === 'squad') get().advanceTutorial(2)
+      },
+
+      // ── Onboarding (bienvenida + guía de primeros pasos) ─────────────────────
+
+      dismissWelcome(startTutorial) {
+        set(({ onboarding }) => ({
+          onboarding: {
+            ...onboarding,
+            welcomeSeen: true,
+            tutorialActive: !!startTutorial,
+            tutorialStep: startTutorial ? 1 : 0,
+          },
+        }))
+      },
+
+      skipTutorial() {
+        set(({ onboarding }) => ({ onboarding: { ...onboarding, welcomeSeen: true, tutorialActive: false, tutorialStep: 0 } }))
+      },
+
+      // Destacado contextual — una frase la primera vez que el jugador entra
+      // a Plantel/Táctica/Mercado, independiente de la guía de pasos (así
+      // igual orienta a quien saltó el tutorial).
+      dismissScreenTip(key) {
+        const { onboarding } = get()
+        set({ onboarding: { ...onboarding, seenScreenTips: { ...onboarding.seenScreenTips, [key]: true } } })
+      },
+
+      // Avanza el paso guiado solo si venía exactamente del paso `fromStep` —
+      // así una acción disparada fuera de orden (o dos veces) no rompe la
+      // secuencia. Al pasar del paso 4 apaga el tutorial y avisa por toast.
+      advanceTutorial(fromStep) {
+        const { onboarding, events } = get()
+        if (!onboarding.tutorialActive || onboarding.tutorialStep !== fromStep) return
+        const nextStep = fromStep + 1
+        if (nextStep > 4) {
+          set({
+            onboarding: { ...onboarding, tutorialActive: false, tutorialStep: 0 },
+            events: [...events, {
+              id: Date.now(),
+              text: '🎉 Ya sabés lo básico. Explorá el resto a tu ritmo — el ❓ de arriba tiene el reglamento completo.',
+              type: 'success',
+            }],
+          })
+        } else {
+          set({ onboarding: { ...onboarding, tutorialStep: nextStep } })
+        }
       },
 
       clearEvents() {
@@ -3810,7 +3874,7 @@ const useGame = create(
     }),
     {
       name: 'dt-career-save',
-      version: 18,
+      version: 20,
       migrate(state, version) {
         let s = state
         if (version < 2) {
@@ -3941,6 +4005,18 @@ const useGame = create(
               squad: (c.squad || []).map(p => p.contract ? p : { ...p, contract: assignInitialContract(p) }),
             })),
           }
+        }
+        if (version < 19) {
+          // Onboarding nuevo — partidas guardadas ya pasaron sus primeros
+          // pasos, así que arrancan con la bienvenida ya vista (no se les
+          // interrumpe la partida con un tutorial que no necesitan).
+          s = { ...s, onboarding: { welcomeSeen: true, tutorialActive: false, tutorialStep: 0 } }
+        }
+        if (version < 20) {
+          // Destacados contextuales por pantalla — cualquier save ya
+          // existente (recién migrado a v19 arriba o de antes) los da por
+          // vistos, para no interrumpir a nadie que ya viene jugando.
+          s = { ...s, onboarding: { ...s.onboarding, seenScreenTips: { squad: true, tactics: true, market: true } } }
         }
         return s
       },

@@ -6,6 +6,7 @@ import {
   DEFAULT_TACTICS, MENTALITY_LABELS, PRESSING_LABELS, TEMPO_LABELS, ATTACK_LABELS,
 } from '../data/tactics.js'
 import LineupScreen from './LineupScreen.jsx'
+import ScreenTip from '../components/ScreenTip.jsx'
 
 // Field-diagram chip colors — deliberately not brand tokens: this renders a
 // literal grass pitch, so it keeps its own football-shirt-style palette
@@ -140,6 +141,10 @@ export default function TacticsScreen() {
           </button>
         ))}
       </div>
+
+      <ScreenTip screenKey="tactics" className="mx-4 mt-3">
+        Elegí formación y armá tu once titular acá — la posición de cada jugador importa.
+      </ScreenTip>
 
       {/* Formación tab */}
       <div className={tacticsTab === 'formation' ? 'block' : 'hidden'}>

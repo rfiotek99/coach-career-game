@@ -3,6 +3,7 @@ import useGame from '../store/useGame.js'
 import { LEAGUES, POSITION_ROLE } from '../data/gameData.js'
 import { getTransferWindow, calcTransferValue } from '../engine/sim.js'
 import { COUNTRIES, getCountryLeagues, getWorldClubsByLeague } from '../data/worldData.js'
+import ScreenTip from '../components/ScreenTip.jsx'
 
 const POS_COLORS = {
   POR: '#f59e0b', CAR: '#3b82f6', LD: '#60a5fa', LI: '#60a5fa',
@@ -47,6 +48,68 @@ function fmtK(n) {
   const sign = n < 0 ? '-' : ''
   if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`
   return `${sign}$${Math.round(abs / 1_000)}k`
+}
+
+// ── Amount stepper: reemplaza el slider de "arrastrar" por −/+ al estilo
+// FIFA — arranca en el valor de referencia (lo decide cada caller), suma o
+// resta `step` por toque, y el número del medio se puede tocar para escribir
+// un monto a mano si hace falta algo muy puntual. Misma lógica de bounds que
+// antes (min/max los sigue calculando cada caller, acá solo se respetan).
+function AmountStepper({ value, onChange, min, max, step }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const clamp = n => Math.max(min, Math.min(max, n))
+
+  const startEdit = () => {
+    setDraft(String(value))
+    setEditing(true)
+  }
+  const commitEdit = () => {
+    const parsed = Math.round(Number(draft))
+    onChange(clamp(Number.isFinite(parsed) ? parsed : value))
+    setEditing(false)
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => onChange(clamp(value - step))}
+        disabled={value <= min}
+        className="w-10 h-10 shrink-0 rounded-lg bg-carbon-high text-ink-dim font-data text-lg font-bold active:bg-line disabled:opacity-30"
+      >
+        −
+      </button>
+      {editing ? (
+        <input
+          type="number"
+          autoFocus
+          inputMode="numeric"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          className="flex-1 min-w-0 text-center bg-carbon-raised border border-volt rounded-lg py-2 font-data text-ink font-bold text-base"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={startEdit}
+          className="flex-1 min-w-0 text-center font-data text-ink font-bold text-base py-2 rounded-lg bg-carbon-raised border border-line active:bg-carbon-high"
+        >
+          {fmtK(value)}
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => onChange(clamp(value + step))}
+        disabled={value >= max}
+        className="w-10 h-10 shrink-0 rounded-lg bg-carbon-high text-ink-dim font-data text-lg font-bold active:bg-line disabled:opacity-30"
+      >
+        +
+      </button>
+    </div>
+  )
 }
 
 function PosBadge({ pos }) {
@@ -215,18 +278,13 @@ function OfferSheet({ player, club, myBudget, onSubmit, onClose }) {
           </div>
         </div>
         <div className="mb-5">
-          <div className="flex items-center justify-between mb-2">
-            <span className="font-data text-ink-dim text-xs">Tu oferta</span>
-            <span className="font-data text-ink font-bold">{fmtK(amount)}</span>
-          </div>
-          <input
-            type="range"
+          <span className="font-data text-ink-dim text-xs mb-2 block">Tu oferta</span>
+          <AmountStepper
+            value={amount}
+            onChange={setAmount}
             min={minOffer}
             max={Math.max(minOffer, maxOffer)}
             step={step}
-            value={Math.max(minOffer, Math.min(amount, maxOffer || minOffer))}
-            onChange={e => setAmount(Number(e.target.value))}
-            className="w-full accent-[#c8ff32]"
           />
           <div className="flex justify-between mt-1.5">
             <span className="font-data text-ink-faint text-[10px]">{fmtK(minOffer)}</span>
@@ -384,18 +442,13 @@ function SellToWorldClubSheet({ club, mySquad, onSubmit, onClose }) {
           </div>
         </div>
         <div className="mb-5">
-          <div className="flex items-center justify-between mb-2">
-            <span className="font-data text-ink-dim text-xs">Tu precio</span>
-            <span className="font-data text-ink font-bold">{fmtK(amount)}</span>
-          </div>
-          <input
-            type="range"
+          <span className="font-data text-ink-dim text-xs mb-2 block">Tu precio</span>
+          <AmountStepper
+            value={amount}
+            onChange={setAmount}
             min={minAmount}
             max={maxAmount}
             step={step}
-            value={amount}
-            onChange={e => setAmount(Number(e.target.value))}
-            className="w-full accent-[#c8ff32]"
           />
           <div className="flex justify-between mt-1.5">
             <span className="font-data text-ink-faint text-[10px]">{fmtK(minAmount)}</span>
@@ -465,18 +518,13 @@ function IncomingCard({ offer, mySquadSize, onRespond }) {
         </div>
       ) : (
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="font-data text-ink-dim text-xs">Pedís</span>
-            <span className="font-data text-ink font-bold">{fmtK(counterAmt)}</span>
-          </div>
-          <input
-            type="range"
+          <span className="font-data text-ink-dim text-xs mb-1.5 block">Pedís</span>
+          <AmountStepper
+            value={counterAmt}
+            onChange={setCounterAmt}
             min={minCounter}
             max={maxCounter}
             step={step}
-            value={counterAmt}
-            onChange={e => setCounterAmt(Number(e.target.value))}
-            className="w-full accent-[#c8ff32]"
           />
           <div className="flex gap-2 mt-2">
             <button
@@ -548,18 +596,13 @@ function OutgoingCard({ offer, myBudget, onRespond }) {
         </div>
       ) : (
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="font-data text-ink-dim text-xs">Tu nueva oferta</span>
-            <span className="font-data text-ink font-bold">{fmtK(bidAmt)}</span>
-          </div>
-          <input
-            type="range"
+          <span className="font-data text-ink-dim text-xs mb-1.5 block">Tu nueva oferta</span>
+          <AmountStepper
+            value={Math.min(bidAmt, maxBid)}
+            onChange={setBidAmt}
             min={offer.amount}
             max={Math.max(offer.amount, maxBid)}
             step={step}
-            value={Math.min(bidAmt, maxBid)}
-            onChange={e => setBidAmt(Number(e.target.value))}
-            className="w-full accent-[#c8ff32]"
           />
           <div className="flex gap-2 mt-2">
             <button
@@ -669,6 +712,9 @@ export default function MarketScreen() {
 
   return (
     <div className="px-4 py-4 pb-24 space-y-3">
+      <ScreenTip screenKey="market">
+        El mercado de pases: fichá agentes libres o negociá con otros clubes para reforzar tu plantel.
+      </ScreenTip>
       <WindowBanner league={activeLg} />
 
       {/* Budget */}

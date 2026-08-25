@@ -8,6 +8,8 @@ import PressConferenceModal from './components/PressConferenceModal.jsx'
 import LifeEventModal from './components/LifeEventModal.jsx'
 import CelebrationModal from './components/CelebrationModal.jsx'
 import ContractNegotiationModal from './components/ContractNegotiationModal.jsx'
+import WelcomeModal from './components/WelcomeModal.jsx'
+import TutorialGuide from './components/TutorialGuide.jsx'
 
 import MainMenu from './screens/MainMenu.jsx'
 import Dashboard from './screens/Dashboard.jsx'
@@ -97,6 +99,7 @@ export default function App() {
   const liveMatch = useGame(s => s.liveMatch)
   const celebrations = useGame(s => s.celebrations)
   const contractNegotiation = useGame(s => s.contractNegotiation)
+  const onboarding = useGame(s => s.onboarding)
 
   if (screen === 'main-menu') {
     return <MainMenu />
@@ -109,11 +112,13 @@ export default function App() {
   return (
     <div className="flex flex-col min-h-dvh bg-carbon mx-auto" style={{ maxWidth: 430 }}>
       <Header />
+      <TutorialGuide />
       <main className="flex-1 overflow-y-auto scrollable">
         <TabContent screen={screen} activeTab={activeTab} currentJob={currentJob} />
       </main>
       <BottomNav />
       <Toast />
+      {!onboarding.welcomeSeen && <WelcomeModal />}
       {matchReport && <MatchReportModal />}
       {!matchReport && celebrations.length > 0 && <CelebrationModal />}
       {!matchReport && celebrations.length === 0 && pressConference && <PressConferenceModal />}

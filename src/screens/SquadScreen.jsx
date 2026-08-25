@@ -2,6 +2,7 @@ import { useState } from 'react'
 import useGame from '../store/useGame.js'
 import { CHARLA_TYPES } from '../data/lifeEvents.js'
 import { POSITION_ORDER as POS_ORDER, POSITION_COLORS as POS_COLORS } from '../data/gameData.js'
+import ScreenTip from '../components/ScreenTip.jsx'
 
 function getTrend(player) {
   const { age, skill, potential } = player
@@ -65,6 +66,9 @@ export default function SquadScreen() {
 
   return (
     <div className="px-4 py-4 pb-24">
+      <ScreenTip screenKey="squad">
+        Acá está tu plantel completo: mirá el nivel y la moral de cada jugador antes de armar tu equipo.
+      </ScreenTip>
       <div className="flex items-center justify-between mb-4">
         <div>
           <p className="font-title text-ink text-lg leading-none">{club.name}</p>
