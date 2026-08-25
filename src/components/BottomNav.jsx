@@ -22,17 +22,24 @@ const UNEMPLOYED_TABS = [
   { id: 'world',   Icon: Globe,         label: 'Mundo'    },
 ]
 
+// Guía de primeros pasos (ver TutorialGuide.jsx) — solo los pasos 2 y 3
+// mapean 1 a 1 con una pestaña concreta (paso 1 son varios botones "Aceptar
+// Cargo", paso 4 es un botón dentro de Inicio, en la pestaña donde ya estás).
+const STEP_TARGET_TAB = { 2: 'squad', 3: 'tactics' }
+
 export default function BottomNav() {
   const activeTab = useGame(s => s.activeTab)
   const currentJob = useGame(s => s.currentJob)
   const setTab = useGame(s => s.setTab)
   const screen = useGame(s => s.screen)
   const transferOffers = useGame(s => s.transferOffers)
+  const onboarding = useGame(s => s.onboarding)
 
   if (!['dashboard','unemployed'].includes(screen)) return null
 
   const tabs = currentJob ? EMPLOYED_TABS : UNEMPLOYED_TABS
   const pendingOffers = (transferOffers || []).filter(o => o.status === 'pending' || o.status === 'countered').length
+  const guidedTab = onboarding.tutorialActive ? STEP_TARGET_TAB[onboarding.tutorialStep] : null
 
   return (
     <nav className="form-bar">
@@ -40,6 +47,7 @@ export default function BottomNav() {
         {tabs.map(tab => {
           const active = activeTab === tab.id
           const showBadge = tab.id === 'market' && pendingOffers > 0
+          const isGuided = guidedTab === tab.id && !active
           const Icon = tab.Icon
           return (
             <button
@@ -49,13 +57,16 @@ export default function BottomNav() {
                 active ? 'text-volt' : 'text-ink-faint active:text-ink-dim'
               }`}
             >
-              <Icon size={20} strokeWidth={active ? 2.25 : 2} />
+              <Icon size={20} strokeWidth={active ? 2.25 : 2} className={isGuided ? 'pulse-gold' : ''} />
               {showBadge && (
                 <span className="absolute top-1.5 right-[18%] min-w-[14px] h-[14px] rounded-full bg-magenta text-ink font-data text-[8px] font-bold flex items-center justify-center px-0.5">
                   {pendingOffers}
                 </span>
               )}
-              <span className={`font-data text-[9px] font-semibold ${active ? 'text-volt' : 'text-ink-faint'}`}>
+              {isGuided && (
+                <span className="absolute top-1.5 right-[18%] w-2 h-2 rounded-full bg-volt pulse-gold" />
+              )}
+              <span className={`font-data text-[9px] font-semibold ${active ? 'text-volt' : isGuided ? 'text-volt' : 'text-ink-faint'}`}>
                 {tab.label}
               </span>
               {active && <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-6 h-[2px] bg-volt" />}

@@ -730,7 +730,7 @@ const useGame = create(
         welcomeSeen: false,
         tutorialActive: false,
         tutorialStep: 0, // 0=inactivo, 1..4=pasos guiados
-        seenScreenTips: { squad: false, tactics: false, market: false },
+        seenScreenTips: { squad: false, tactics: false, market: false, cup: false },
       },
 
       // Coach
@@ -3874,7 +3874,7 @@ const useGame = create(
     }),
     {
       name: 'dt-career-save',
-      version: 20,
+      version: 21,
       migrate(state, version) {
         let s = state
         if (version < 2) {
@@ -4017,6 +4017,11 @@ const useGame = create(
           // existente (recién migrado a v19 arriba o de antes) los da por
           // vistos, para no interrumpir a nadie que ya viene jugando.
           s = { ...s, onboarding: { ...s.onboarding, seenScreenTips: { squad: true, tactics: true, market: true } } }
+        }
+        if (version < 21) {
+          // Tip de Copa — mismo criterio: cualquier save ya existente (incluso
+          // uno creado hoy mismo, antes de este cambio) lo da por visto.
+          s = { ...s, onboarding: { ...s.onboarding, seenScreenTips: { ...s.onboarding.seenScreenTips, cup: true } } }
         }
         return s
       },

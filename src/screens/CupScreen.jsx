@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import useGame from '../store/useGame.js'
 import { WORLD_CLUBS } from '../data/worldData.js'
+import ScreenTip from '../components/ScreenTip.jsx'
 
 const CONTINENT_META = {
   europa:       { flag: '🌍', name: 'Europa' },
@@ -232,6 +233,9 @@ export default function CupScreen() {
 
   return (
     <div className="px-4 py-4 pb-24 space-y-6">
+      <ScreenTip screenKey="cup">
+        Acá seguís la Copa continental y el Mundial de Clubes si tu club clasifica — se juegan en paralelo a la liga.
+      </ScreenTip>
       <div className="flex rounded-xl overflow-hidden border border-line">
         {CONTINENT_ORDER.map(cid => (
           <button
