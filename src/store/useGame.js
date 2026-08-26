@@ -724,8 +724,10 @@ const useGame = create(
       activeTab: 'home',
       hasGame: false,
 
-      // Onboarding — no se resetea en startNewGame/resetGame a propósito: es
-      // "de por vida", no por carrera. Ver dismissWelcome/skipTutorial/advanceTutorial.
+      // Onboarding — se resetea en cada startNewGame() (no en resetGame(), que
+      // solo vuelve al menú principal): la bienvenida y la guía de primeros
+      // pasos aparecen en cada carrera nueva, no una sola vez en la vida del
+      // jugador. Ver dismissWelcome/skipTutorial/advanceTutorial.
       onboarding: {
         welcomeSeen: false,
         tutorialActive: false,
@@ -857,6 +859,12 @@ const useGame = create(
           screen: 'unemployed',
           activeTab: 'home',
           season: 1,
+          onboarding: {
+            welcomeSeen: false,
+            tutorialActive: false,
+            tutorialStep: 0,
+            seenScreenTips: { squad: false, tactics: false, market: false, cup: false },
+          },
           clubs: clubsWithManagers,
           freeAgents,
           leagues: leagueState,
