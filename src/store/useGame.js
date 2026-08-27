@@ -107,6 +107,71 @@ function makeAvailableJobs(clubs, coachRep, jobHistory, season) {
     }))
 }
 
+// ── Reputación: cuánto pesa la división donde dirigís ─────────────────────────
+// El progreso de reputación depende de DÓNDE lo conseguís: ganarle a un rival o
+// cumplir el objetivo en primera vale más que en el ascenso. Se aplica al delta
+// por partido (simulateMatchday) y alimenta baseRepFromCareer.
+function leagueTierOf(leagueId) {
+  const arg = LEAGUES.find(l => l.id === leagueId)
+  if (arg) return arg.tier
+  const world = WORLD_LEAGUES.find(l => l.id === leagueId)
+  if (world) return world.tier
+  return 3
+}
+
+function repDivisionMultiplier(leagueId) {
+  if (LEAGUES.find(l => l.id === leagueId)) {
+    const t = leagueTierOf(leagueId)
+    return t === 1 ? 1.2 : t === 2 ? 0.8 : 0.5
+  }
+  if (WORLD_LEAGUES.find(l => l.id === leagueId)) {
+    return leagueTierOf(leagueId) === 1 ? 1.5 : 1.0
+  }
+  return 0.5
+}
+
+// ── Reputación base: la que "te corresponde" por tu palmarés ──────────────────
+// processSeasonEnd hace que la reputación real gravite un 25% hacia este valor
+// cada fin de temporada, así el tiempo SIN logros la baja en vez de inflarla.
+// La migración v22 la usa para recalcular de una los saves viejos.
+const LEAGUE_TITLE_REP = { 1: 20, 2: 13, 3: 8 }
+const PROMOTION_REP = { 1: 14, 2: 9 }
+const CONTINENTAL_CUP_REP = 16
+const WORLD_CUP_REP = 24
+const BEST_TIER_REP = { 1: 12, 2: 5, 3: 1 }
+const BASE_REP_REGRESSION = 0.25
+
+function baseRepFromCareer(coach) {
+  let rep = 3
+
+  for (const t of coach.trophies || []) {
+    if (t.leagueId === 'mundial-de-clubes') { rep += WORLD_CUP_REP; continue }
+    if (typeof t.leagueId === 'string' && t.leagueId.startsWith('copa-')) { rep += CONTINENTAL_CUP_REP; continue }
+    rep += LEAGUE_TITLE_REP[leagueTierOf(t.leagueId)] || LEAGUE_TITLE_REP[3]
+  }
+
+  for (const p of coach.promotions || []) {
+    rep += PROMOTION_REP[p.toTier] || PROMOTION_REP[2]
+  }
+
+  if (coach.bestTierManaged != null) rep += BEST_TIER_REP[coach.bestTierManaged] || 0
+
+  // Longevidad: aporte chico y con techo bajo (15) — una carrera larga en el
+  // ascenso te hace "Regional", nunca leyenda. Un solo título pesa más que
+  // dos décadas de trayectoria.
+  rep += Math.min(15, (coach.seasonsManaged || 0) * 1.5)
+
+  // El perfil inicial (tu nombre como ex-jugador) abre puertas al principio,
+  // pero se diluye a lo largo de ~8 temporadas: después mandan los resultados.
+  const profile = STARTING_PROFILES.find(p => p.id === coach.profileId)
+  if (profile) {
+    const fade = Math.max(0, 1 - (coach.seasonsManaged || 0) / 8)
+    rep += profile.startRep * fade
+  }
+
+  return clamp(Math.round(rep), 0, 100)
+}
+
 function getClubsMap(clubs) {
   return Object.fromEntries(clubs.map(c => [c.id, c]))
 }
@@ -194,12 +259,12 @@ WORLD_CLUBS.forEach(c => {
 // continente que arrancó ahí, así que el mismo lookup sirve para las 3 copas
 // sin cambios.
 const CUP_REWARDS = {
-  qualifyGroup: { rep: 1, money: 0 },
-  round16:      { rep: 2, money: 40_000 },
+  qualifyGroup: { rep: 0, money: 0 },
+  round16:      { rep: 1, money: 40_000 },
   quarters:     { rep: 2, money: 80_000 },
-  semis:        { rep: 3, money: 150_000 },
-  champion:     { rep: 8, money: 500_000 },
-  runnerUp:     { rep: 4, money: 200_000 },
+  semis:        { rep: 4, money: 150_000 },
+  champion:     { rep: 15, money: 500_000 },
+  runnerUp:     { rep: 7, money: 200_000 },
 }
 const CUP_ROUND_NAME = { 16: 'Octavos de Final', 8: 'Cuartos de Final', 4: 'Semifinal', 2: 'Final' }
 
@@ -421,8 +486,8 @@ function advanceSingleCup(continentId, cup, clubs, coach, season, playerClubId, 
 // bracket de grupos+eliminación de cup.js, pero sí reutiliza
 // simulateMixedMatch/attributeMatchGoals (mismo motor de partido).
 const WORLD_CUP_REWARDS = {
-  champion: { rep: 12, money: 800_000 },
-  runnerUp: { rep: 6, money: 300_000 },
+  champion: { rep: 22, money: 800_000 },
+  runnerUp: { rep: 10, money: 300_000 },
 }
 
 function createWorldCup(champions, season) {
@@ -902,6 +967,7 @@ const useGame = create(
           worldSeed: s + 999983,
           coach: {
             name: coachName,
+            profileId: profile.id,
             reputation: profile.startRep,
             money: profile.startMoney,
             totalMatches: 0,
@@ -911,6 +977,8 @@ const useGame = create(
             seasonsManaged: 0,
             jobHistory: [],
             trophies: [],
+            promotions: [],
+            bestTierManaged: null,
           },
         })
       },
@@ -2359,7 +2427,10 @@ const useGame = create(
             newCoach.totalLosses++
             newCoach.totalMatches++
           }
-          newCoach.reputation = clamp(newCoach.reputation + repDelta, 0, 100)
+          // El delta por partido pesa según la división: superar expectativas
+          // en primera suma más que en el ascenso (ver repDivisionMultiplier).
+          const repLeagueId = foreignLeague ? foreignLeague.leagueId : clubsMap[currentJob.clubId]?.leagueId
+          newCoach.reputation = clamp(newCoach.reputation + Math.round(repDelta * repDivisionMultiplier(repLeagueId)), 0, 100)
           newCoach.money += newJob.salary
 
           newJob.boardConfidence = clamp(newJob.boardConfidence + confDelta + extraConfDelta, 0, 100)
@@ -3007,6 +3078,11 @@ const useGame = create(
           const repBonus = objectiveRepBonus(objectiveMet, currentJob.objective)
           newCoach.reputation = clamp(newCoach.reputation + repBonus, 0, 100)
 
+          // Mejor división dirigida (1 = elite): alimenta baseRepFromCareer, así
+          // haber gestionado arriba pesa aunque no hayas ganado todo.
+          const managedTier = leagueTierOf(playerOriginalLeagueId)
+          newCoach.bestTierManaged = Math.min(newCoach.bestTierManaged ?? 9, managedTier)
+
           const won = pos === 1
           if (won) {
             newCoach.trophies = [
@@ -3027,6 +3103,11 @@ const useGame = create(
 
           const promoted = !isWorldJob && !!promotions[currentJob.clubId]
           if (promoted) {
+            // toTier = categoría a la que ascendés; pesa fuerte en baseRepFromCareer.
+            newCoach.promotions = [
+              ...(newCoach.promotions || []),
+              { season, clubId: currentJob.clubId, toTier: leagueTierOf(promotions[currentJob.clubId]) },
+            ]
             seasonCelebrations.push(makeCelebration({
               type: 'promotion', icon: '⬆️',
               title: '¡ASCENSO!',
@@ -3334,6 +3415,19 @@ const useGame = create(
         const newLeagueState = buildLeagueState(updatedClubs.filter(c => LEAGUES.find(l => l.id === c.leagueId)))
         const newFreeAgents = [...generateFreeAgents(Date.now(), 35), ...departingContractPlayers]
 
+        // ── Regresión de reputación hacia el palmarés ────────────────────────────
+        // Cada fin de temporada la reputación gravita hacia la que "te
+        // corresponde" por lo que lograste. Una temporada floja la deja igual;
+        // varias sin títulos/ascensos/copas la bajan de a poco. Así el tiempo
+        // ya no es un camino a la gloria.
+        {
+          const target = baseRepFromCareer(newCoach)
+          newCoach.reputation = clamp(
+            Math.round(newCoach.reputation + (target - newCoach.reputation) * BASE_REP_REGRESSION),
+            0, 100,
+          )
+        }
+
         // ── Subida de tier de reputación (fin de temporada) ──────────────────────
         const repTierCelebration = checkRepTierUp(repBeforeSeasonEnd, newCoach.reputation)
         if (repTierCelebration) seasonCelebrations.push(repTierCelebration)
@@ -3616,8 +3710,9 @@ const useGame = create(
 
         const { clubId, clubName } = notif.actionPayload
 
-        // Update coach: +3 rep for being headhunted, log previous job
-        let newCoach = { ...coach, reputation: clamp(coach.reputation + 3, 0, 100) }
+        // Update coach: +1 rep for being headhunted (que te tienten es
+        // consecuencia de tus logros, no un logro en sí), log previous job
+        let newCoach = { ...coach, reputation: clamp(coach.reputation + 1, 0, 100) }
         if (currentJob) {
           const prevClub = clubs.find(c => c.id === currentJob.clubId)
           newCoach.jobHistory = [
@@ -3882,7 +3977,7 @@ const useGame = create(
     }),
     {
       name: 'dt-career-save',
-      version: 21,
+      version: 22,
       migrate(state, version) {
         let s = state
         if (version < 2) {
@@ -4030,6 +4125,30 @@ const useGame = create(
           // Tip de Copa — mismo criterio: cualquier save ya existente (incluso
           // uno creado hoy mismo, antes de este cambio) lo da por visto.
           s = { ...s, onboarding: { ...s.onboarding, seenScreenTips: { ...s.onboarding.seenScreenTips, cup: true } } }
+        }
+        if (version < 22) {
+          // Rebalanceo de reputación: antes se inflaba con el tiempo (empatar lo
+          // esperado sumaba, "mantener categoría" sumaba, sin decaimiento). Ahora
+          // la reputación es la que "te corresponde" por tu palmarés. Se
+          // recalcula de una — un DT sin títulos ni ascensos baja, y está bien.
+          const c = s.coach || {}
+          let bestTier = c.bestTierManaged ?? null
+          for (const t of c.trophies || []) {
+            if (t.leagueId === 'mundial-de-clubes') continue
+            if (typeof t.leagueId === 'string' && t.leagueId.startsWith('copa-')) continue
+            bestTier = Math.min(bestTier ?? 9, leagueTierOf(t.leagueId))
+          }
+          if (s.currentJob) {
+            const club = (s.clubs || []).find(cl => cl.id === s.currentJob.clubId)
+            if (club) bestTier = Math.min(bestTier ?? 9, leagueTierOf(club.leagueId))
+          }
+          const migCoach = {
+            ...c,
+            promotions: c.promotions || [],
+            bestTierManaged: bestTier,
+          }
+          migCoach.reputation = baseRepFromCareer(migCoach)
+          s = { ...s, coach: migCoach }
         }
         return s
       },

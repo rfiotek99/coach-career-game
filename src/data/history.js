@@ -38,7 +38,7 @@ function rivalProfile(name) {
   const seasonsManaged = 8 + Math.floor(r * 18)          // 8–25 temporadas
   const titles = Math.floor(r * seasonsManaged * 0.35)    // carrera plausible
   const reputation = 50 + Math.floor(((seed >> 3) % 1000) / 1000 * 50) // 50–99
-  const score = titles * 100 + seasonsManaged * 5 + reputation
+  const score = titles * 100 + seasonsManaged * 1 + reputation * 2
   return { name, seasonsManaged, titles, reputation, score }
 }
 
@@ -50,7 +50,7 @@ export function getHallOfFame(coach) {
     seasonsManaged: coach.seasonsManaged || 0,
     titles: coach.trophies?.length || 0,
     reputation: coach.reputation,
-    score: (coach.trophies?.length || 0) * 100 + (coach.seasonsManaged || 0) * 5 + coach.reputation,
+    score: (coach.trophies?.length || 0) * 100 + (coach.seasonsManaged || 0) * 1 + coach.reputation * 2,
     isPlayer: true,
   }
   return [...rivals, mine]

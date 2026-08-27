@@ -232,13 +232,17 @@ export function getObjective(club, leagueId, overrideLeague = null) {
 // Camino de reconocimiento del DT — cada escalón es un hito de reputación.
 // getRepLabel deriva de esta misma lista para que UI (Header, HistoryScreen)
 // y lógica compartan una única fuente de verdad.
+// Umbrales pensados para que el tiempo NO sea un camino a la gloria: con la
+// reputación gravitando hacia baseRepFromCareer (ver useGame.js), llegar a
+// "Elite" ya implica una carrera sólida en primera, y "Leyenda" exige varios
+// títulos/ascensos o una copa continental + gestión en la elite.
 export const REP_TIERS = [
   { min: 0,  label: 'Desconocido', color: '#9ca3af', icon: '❓' },
-  { min: 10, label: 'Regional',    color: '#60a5fa', icon: '📍' },
-  { min: 25, label: 'Nacional',    color: '#34d399', icon: '🏟️' },
-  { min: 45, label: 'Reconocido',  color: '#f0b429', icon: '⭐' },
-  { min: 65, label: 'Elite',       color: '#f97316', icon: '🔥' },
-  { min: 82, label: 'Leyenda',     color: '#ec4899', icon: '👑' },
+  { min: 12, label: 'Regional',    color: '#60a5fa', icon: '📍' },
+  { min: 28, label: 'Nacional',    color: '#34d399', icon: '🏟️' },
+  { min: 48, label: 'Reconocido',  color: '#f0b429', icon: '⭐' },
+  { min: 70, label: 'Elite',       color: '#f97316', icon: '🔥' },
+  { min: 90, label: 'Leyenda',     color: '#ec4899', icon: '👑' },
 ]
 
 export function getRepLabel(rep) {
@@ -251,8 +255,8 @@ export function getRepLabel(rep) {
 }
 
 export function canApplyToClub(coachRep, clubPrestige) {
-  if (clubPrestige >= 90) return coachRep >= 60
-  if (clubPrestige >= 80) return coachRep >= 45
+  if (clubPrestige >= 90) return coachRep >= 68
+  if (clubPrestige >= 80) return coachRep >= 48
   if (clubPrestige >= 70) return coachRep >= 30
   if (clubPrestige >= 55) return coachRep >= 15
   if (clubPrestige >= 40) return coachRep >= 5

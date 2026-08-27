@@ -86,14 +86,15 @@ function InicioContent() {
           'Prestigio 40 a 54 → necesitás al menos 5 de reputación.',
           'Prestigio 55 a 69 → necesitás al menos 15.',
           'Prestigio 70 a 79 → necesitás al menos 30.',
-          'Prestigio 80 a 89 → necesitás al menos 45.',
-          'Prestigio 90 o más (los gigantes) → necesitás al menos 60.',
+          'Prestigio 80 a 89 → necesitás al menos 48.',
+          'Prestigio 90 o más (los gigantes) → necesitás al menos 68.',
         ]}
       />
       <Tip>
-        No te frustres si al principio solo podés dirigir equipos chicos: cada
-        temporada bien jugada te suma reputación, y con eso se te abren clubes
-        cada vez más grandes.
+        No te frustres si al principio solo podés dirigir equipos chicos: ganá
+        partidos que nadie esperaba, cumplí objetivos y salí campeón, y con eso se
+        te abren clubes cada vez más grandes. Aguantar temporadas sin ganar nada
+        no te sube: la reputación refleja lo que lográs, no cuánto llevás.
       </Tip>
     </div>
   )
@@ -382,8 +383,11 @@ function CarreraContent() {
       </P>
       <List
         items={[
-          'Sube cuando ganás partidos que no se esperaban de vos, cuando cumplís el objetivo de la temporada, y cuando salís campeón de algo.',
-          'Baja cuando perdés partidos que deberías haber ganado, cuando no cumplís el objetivo, o si te despiden.',
+          'Sube fuerte cuando salís campeón, ascendés de categoría, ganás una copa continental o el Mundial, o dirigís clubes de primera. Los saltos grandes vienen de los logros grandes.',
+          'Sube de a poco cuando ganás partidos que no se esperaban de vos. Ganar o empatar lo que se esperaba no mueve la aguja.',
+          'Baja cuando perdés partidos que deberías haber ganado, cuando descendés o no cumplís un objetivo ambicioso, o si te despiden.',
+          'Cada fin de temporada la reputación tiende a la que te corresponde por tu palmarés: varias temporadas sin ganar nada la van bajando. Sobrevivir en el ascenso no te hace leyenda.',
+          'Lo que lográs pesa más si es en una división más alta: campeón de la Liga Premier vale más que campeón de la Regional.',
         ]}
       />
       <SubTitle>La confianza de la dirigencia</SubTitle>

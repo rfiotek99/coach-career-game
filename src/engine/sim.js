@@ -308,10 +308,15 @@ export function calcRepDelta(playerTeamId, homeId, homeGoals, awayGoals, homeStr
   if (playerGoals > opponentGoals) result = 'win'
   else if (playerGoals < opponentGoals) result = 'loss'
 
+  // Fila = resultado real, columna = resultado esperado. La reputación SOLO
+  // sube cuando superás lo que se esperaba de vos: cumplir exactamente lo
+  // previsto (empate esperado/empate, derrota esperada/derrota, y casi también
+  // ganar lo que debías ganar) da ~0. Sobrevivir sin dar sorpresas no infla
+  // nada; el que se queda corto pierde reputación.
   const table = {
-    win:  { win:  1, draw:  2, loss:  5 },
-    draw: { win: -1, draw:  1, loss:  2 },
-    loss: { win: -3, draw: -1, loss:  0 },
+    win:  { win:  0.5, draw:  2, loss:  5 },
+    draw: { win: -2,   draw:  0, loss:  2 },
+    loss: { win: -4,   draw: -2, loss:  0 },
   }
   return table[result][expected]
 }
@@ -335,13 +340,15 @@ export function checkObjective(position, objective) {
 
 export function objectiveRepBonus(met, objective) {
   const { type } = objective
+  // Los logros ambiciosos (campeón, ascenso) pegan fuerte; "mantener categoría"
+  // cumplido no suma nada (es el piso, no un logro) pero descender castiga.
   const bonuses = {
-    champion: { met: 10, failed: -8 },
-    promote:  { met: 8,  failed: -5 },
-    top:      { met: 5,  failed: -3 },
-    survive:  { met: 3,  failed: -4 },
+    champion: { met: 16, failed: -6 },
+    promote:  { met: 12, failed: -5 },
+    top:      { met: 4,  failed: -4 },
+    survive:  { met: 0,  failed: -8 },
   }
-  const b = bonuses[type] || { met: 3, failed: -3 }
+  const b = bonuses[type] || { met: 2, failed: -3 }
   return met ? b.met : b.failed
 }
 
